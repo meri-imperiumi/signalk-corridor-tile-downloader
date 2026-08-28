@@ -61,6 +61,10 @@ function createMockApp() {
       return this.pathTree[p];
     },
     router,
+    dataDir: null,
+    getDataDirPath() {
+      return this.dataDir;
+    },
   };
 }
 
@@ -167,22 +171,12 @@ describe("plugin", () => {
     plugin = pluginFactory(app);
     dir = fs.mkdtempSync(path.join(os.tmpdir(), "plugin-test-"));
     dbPath = path.join(dir, "passage_cache.mbtiles");
+    app.dataDir = path.join(dir, "plugin-data");
   });
 
   afterEach(() => {
     plugin.stop();
-    for (const suffix of ["", "-wal", "-shm"]) {
-      try {
-        fs.unlinkSync(dbPath + suffix);
-      } catch {
-        // ignore
-      }
-    }
-    try {
-      fs.rmdirSync(dir);
-    } catch {
-      // ignore
-    }
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 
   function startWithTestHooks(overrides = {}) {
@@ -841,6 +835,238 @@ describe("plugin", () => {
     route(app, "get", "/status")({}, done);
     assert.equal(done.body.forceOnMetered, true);
     assert.equal(done.body.completed, forced.body.totalTiles);
+  });
+
+  describe("restart resume", () => {
+    /** Path of the restart journal inside the mock data dir. */
+    function pendingJobFile() {
+      return path.join(app.dataDir, pluginFactory.PENDING_JOB_FILENAME);
+    }
+
+    /**
+     * Fetch stub whose responses are released one by one by the test,
+     * so a job can be stopped with exactly N tiles landed.
+     */
+    function gatedFetch() {
+      const gates = [];
+      const fn = () => {
+        let resolve;
+        const promise = new Promise((r) => {
+          resolve = r;
+        });
+        gates.push(resolve);
+        return promise.then(() => ({
+          ok: true,
+          status: 200,
+          headers: pngHeaders,
+          arrayBuffer: async () => PNG,
+        }));
+      };
+      return { gates, fn };
+    }
+
+    test("stop() keeps the journal; a restart resumes only missing tiles", async () => {
+      const fetch1 = gatedFetch();
+      startWithTestHooks({ fetch: fetch1.fn });
+      plugin.registerWithRouter(app.router);
+
+      const res = makeRes();
+      route(
+        app,
+        "post",
+        "/fetch-target",
+      )(
+        {
+          body: {
+            coordinates: [
+              { lat: 0, lon: 0 },
+              { lat: 0, lon: 0.5 },
+            ],
+          },
+        },
+        res,
+      );
+      assert.equal(res.statusCode, 200);
+      const total = res.body.totalTiles;
+      assert.ok(total >= 2, "corridor has multiple tiles");
+
+      // Land exactly one tile, leave the second in flight
+      await waitUntil(() => fetch1.gates.length > 0);
+      fetch1.gates[0]();
+      await waitUntil(() => fetch1.gates.length === 2);
+
+      // The running job is journaled: restart-safe
+      const running = makeRes();
+      route(app, "get", "/status")({}, running);
+      assert.equal(running.body.resumable, true);
+
+      // Simulate a restart: stop keeps the journal (unlike /cancel)
+      plugin.stop();
+      assert.ok(fs.existsSync(pendingJobFile()));
+      const intent = JSON.parse(fs.readFileSync(pendingJobFile(), "utf8"));
+      assert.equal(intent.version, 1);
+      assert.equal(intent.routeName, "Custom target");
+      assert.equal(intent.outputPath, dbPath);
+      assert.equal(intent.coordinates.length, 2);
+      assert.equal(intent.minZoom, 1);
+      assert.equal(intent.maxZoom, 1);
+
+      // Fresh plugin instance over the same cache and journal (the
+      // mock router must forget the stopped instance's handlers)
+      app.router.routes.length = 0;
+      const fetch2 = countingFetch();
+      plugin = pluginFactory(app);
+      startWithTestHooks({ fetch: fetch2.fn });
+      plugin.registerWithRouter(app.router);
+
+      await waitUntil(() => {
+        const s = makeRes();
+        route(app, "get", "/status")({}, s);
+        return s.body.state === "completed";
+      });
+      const done = makeRes();
+      route(app, "get", "/status")({}, done);
+      assert.equal(done.body.routeName, "Custom target");
+      assert.equal(done.body.completed, total - 1);
+      // Only the tiles the interrupted job still lacked were fetched
+      assert.equal(fetch2.calls.length, total - 1);
+      assert.ok(!fs.existsSync(pendingJobFile()));
+      assert.equal(done.body.resumable, false);
+    });
+
+    test("user cancel retires the journal; no resurrection after restart", async () => {
+      const fetch1 = gatedFetch();
+      startWithTestHooks({ fetch: fetch1.fn });
+      plugin.registerWithRouter(app.router);
+      const res = makeRes();
+      route(
+        app,
+        "post",
+        "/fetch-target",
+      )({ body: { coordinates: [{ lat: 0, lon: 0 }] } }, res);
+      assert.equal(res.statusCode, 200);
+      await waitUntil(() => fetch1.gates.length > 0);
+
+      route(app, "post", "/cancel")({}, makeRes());
+      fetch1.gates[0]();
+      await waitUntil(() => {
+        const s = makeRes();
+        route(app, "get", "/status")({}, s);
+        return !s.body.isDownloading;
+      });
+      assert.ok(!fs.existsSync(pendingJobFile()));
+
+      // Restart: nothing resumes
+      app.router.routes.length = 0;
+      const fetch2 = countingFetch();
+      plugin = pluginFactory(app);
+      startWithTestHooks({ fetch: fetch2.fn });
+      plugin.registerWithRouter(app.router);
+      const s = makeRes();
+      route(app, "get", "/status")({}, s);
+      assert.equal(s.body.state, "idle");
+      assert.equal(fetch2.calls.length, 0);
+    });
+
+    test("resume rebuilds the corridor from the journaled geometry", async () => {
+      const fetch1 = gatedFetch();
+      startWithTestHooks({ fetch: fetch1.fn });
+      plugin.registerWithRouter(app.router);
+      const res = makeRes();
+      route(
+        app,
+        "post",
+        "/fetch-target",
+      )({ body: { coordinates: [{ lat: 0, lon: 0 }] } }, res);
+      await waitUntil(() => fetch1.gates.length > 0);
+      plugin.stop();
+
+      // Restart with a wider zoom range in the live config: the
+      // resumed corridor keeps the journaled z1 shape
+      app.router.routes.length = 0;
+      const fetch2 = countingFetch();
+      plugin = pluginFactory(app);
+      startWithTestHooks({ fetch: fetch2.fn, maxZoom: 3 });
+      plugin.registerWithRouter(app.router);
+      await waitUntil(() => {
+        const s = makeRes();
+        route(app, "get", "/status")({}, s);
+        return s.body.state === "completed";
+      });
+      assert.ok(fetch2.calls.length > 0);
+      assert.ok(
+        fetch2.calls.every((url) => /\/1\/\d+\/\d+\.png$/.test(url)),
+        "only journaled z1 tiles fetched",
+      );
+      assert.equal(fetch2.calls.length, res.body.totalTiles);
+    });
+
+    test("corrupt journals are discarded on startup", () => {
+      fs.mkdirSync(app.dataDir, { recursive: true });
+      fs.writeFileSync(pendingJobFile(), "{not json");
+      const fetch = countingFetch();
+      startWithTestHooks({ fetch: fetch.fn });
+      plugin.registerWithRouter(app.router);
+
+      const s = makeRes();
+      route(app, "get", "/status")({}, s);
+      assert.equal(s.body.state, "idle");
+      assert.equal(fetch.calls.length, 0);
+      assert.ok(!fs.existsSync(pendingJobFile()));
+    });
+
+    test("journals for another output path are kept but not resumed", () => {
+      fs.mkdirSync(app.dataDir, { recursive: true });
+      fs.writeFileSync(
+        pendingJobFile(),
+        JSON.stringify({
+          version: 1,
+          outputPath: "/tmp/elsewhere.mbtiles",
+          routeName: "Old cache",
+          forceOnMetered: false,
+          coordinates: [{ lat: 0, lon: 0 }],
+          minZoom: 1,
+          maxZoom: 1,
+          strategicMarginNM: 0.1,
+          tacticalMarginNM: 0.1,
+          approachRadiusNM: 0.1,
+        }),
+      );
+      const fetch = countingFetch();
+      startWithTestHooks({ fetch: fetch.fn });
+      plugin.registerWithRouter(app.router);
+
+      const s = makeRes();
+      route(app, "get", "/status")({}, s);
+      assert.equal(s.body.state, "idle");
+      assert.equal(fetch.calls.length, 0);
+      // Kept: resumes if the configuration is switched back
+      assert.ok(fs.existsSync(pendingJobFile()));
+      assert.equal(s.body.resumable, true);
+    });
+
+    test("jobs run without persistence when no data directory exists", async () => {
+      app.dataDir = null;
+      const fetch = countingFetch();
+      startWithTestHooks({ fetch: fetch.fn });
+      plugin.registerWithRouter(app.router);
+      const res = makeRes();
+      route(
+        app,
+        "post",
+        "/fetch-target",
+      )({ body: { coordinates: [{ lat: 0, lon: 0 }] } }, res);
+      assert.equal(res.statusCode, 200);
+      await waitUntil(() => {
+        const s = makeRes();
+        route(app, "get", "/status")({}, s);
+        return s.body.state === "completed";
+      });
+      const s = makeRes();
+      route(app, "get", "/status")({}, s);
+      assert.equal(s.body.completed, res.body.totalTiles);
+      assert.equal(s.body.resumable, false);
+    });
   });
 });
 

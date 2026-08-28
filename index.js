@@ -5,6 +5,7 @@
  * the active route — or a custom target — into a standard MBTiles file
  * that `signalk-charts-provider-simple` serves to Freeboard SK for
  * offline navigation. This plugin is strictly a data producer.
+ * Passage jobs are journaled and resume automatically after restarts.
  *
  * REST API (mounted at /plugins/signalk-corridor-tile-downloader):
  *   GET  /status              queue + cache snapshot
@@ -96,6 +97,16 @@ const RECOVERY_BANDS = [
  * to download. The client can narrow zoom or margin and retry.
  */
 const MAX_QUEUE_SIZE = 500000;
+
+/**
+ * Restart journal (crash-safe resume): passage jobs are persisted as
+ * their *intent* — coordinates, geometry snapshot, metered override —
+ * rather than as tile lists. Rebuilding the corridor on the next
+ * start() and filtering against the MBTiles cache (`hasTile`) yields
+ * exactly the tiles the interrupted job still lacked.
+ */
+const PENDING_JOB_VERSION = 1;
+const PENDING_JOB_FILENAME = "pending-job.json";
 
 /** The consumer plugin that serves our tiles to Freeboard SK. */
 const CHARTS_PROVIDER_ID = "signalk-charts-provider-simple";
@@ -196,6 +207,49 @@ function httpError(status, message) {
   const err = new Error(message);
   err.status = status;
   return err;
+}
+
+/**
+ * Is the parsed restart journal a well-formed job intent? Hand-edited,
+ * corrupt, or future-version files are discarded, never trusted.
+ *
+ * @param {object|null} intent
+ * @returns {boolean}
+ */
+function isValidPendingJob(intent) {
+  if (intent == null || typeof intent !== "object") return false;
+  if (intent.version !== PENDING_JOB_VERSION) return false;
+  if (typeof intent.outputPath !== "string" || intent.outputPath === "") {
+    return false;
+  }
+  if (typeof intent.routeName !== "string" || intent.routeName === "") {
+    return false;
+  }
+  if (typeof intent.forceOnMetered !== "boolean") return false;
+  const zoomOk = (z) => Number.isInteger(z) && z >= 0 && z <= 22;
+  if (!zoomOk(intent.minZoom) || !zoomOk(intent.maxZoom)) return false;
+  const marginOk = (v) => Number.isFinite(v) && v >= 0;
+  if (
+    !marginOk(intent.strategicMarginNM) ||
+    !marginOk(intent.tacticalMarginNM) ||
+    !marginOk(intent.approachRadiusNM)
+  ) {
+    return false;
+  }
+  if (!Array.isArray(intent.coordinates) || intent.coordinates.length === 0) {
+    return false;
+  }
+  return intent.coordinates.every(
+    (c) =>
+      c != null &&
+      typeof c === "object" &&
+      Number.isFinite(c.lat) &&
+      Number.isFinite(c.lon) &&
+      c.lat >= -90 &&
+      c.lat <= 90 &&
+      c.lon >= -180 &&
+      c.lon <= 180,
+  );
 }
 
 /**
@@ -335,6 +389,12 @@ module.exports = (app) => {
         log: (m) => app.debug(`${PLUGIN_ID}: ${m}`),
         onProgress: () => publishStatus(),
         onSettled: (stats) => {
+          // A naturally completed passage job retires its restart
+          // journal; a job cancelled by stop() keeps its journal so the
+          // next start() resumes it.
+          if (stats.state === "completed" && !stats.isRecovery) {
+            clearPendingJob();
+          }
           // Charts landed in the file: ask the consumer to rescan so the
           // corridor shows up in Freeboard without a provider restart.
           if (stats.completed > 0) {
@@ -344,6 +404,10 @@ module.exports = (app) => {
       });
 
       subscribeToDeltas();
+
+      // Crash-safe resume: restart any passage job journaled before
+      // the last shutdown.
+      resumePendingJob();
 
       publishStatus();
     },
@@ -471,6 +535,88 @@ module.exports = (app) => {
     if (store && !downloader?.status().isDownloading) {
       store.close();
       store = null;
+    }
+  }
+
+  /**
+   * Path of the restart journal inside the plugin data directory, or
+   * null when the server exposes no data directory (persistence off).
+   *
+   * @returns {string|null}
+   */
+  function pendingJobPath() {
+    const dataDir = app.getDataDirPath?.();
+    return typeof dataDir === "string" && dataDir !== ""
+      ? path.join(dataDir, PENDING_JOB_FILENAME)
+      : null;
+  }
+
+  /**
+   * Is a passage job journaled on disk right now?
+   *
+   * @returns {boolean}
+   */
+  function hasPendingJob() {
+    const file = pendingJobPath();
+    return file != null && fs.existsSync(file);
+  }
+
+  /**
+   * Persists the intent of a starting passage job so the next start()
+   * can resume it after a shutdown or crash. Best-effort: a failed
+   * write never blocks the download itself.
+   *
+   * @param {object} intent - Validated job intent
+   */
+  function persistPendingJob(intent) {
+    const file = pendingJobPath();
+    if (!file) return;
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, `${JSON.stringify(intent)}\n`);
+    } catch (err) {
+      app.error(`${PLUGIN_ID}: cannot journal pending job: ${err.message}`);
+    }
+  }
+
+  /**
+   * Reads the restart journal. A missing file yields null; a corrupt
+   * or invalid one is discarded with an error log.
+   *
+   * @returns {object|null} Job intent
+   */
+  function readPendingJob() {
+    const file = pendingJobPath();
+    if (!file) return null;
+    let raw;
+    try {
+      raw = fs.readFileSync(file, "utf8");
+    } catch {
+      return null; // No journal: nothing to resume
+    }
+    let intent = null;
+    try {
+      intent = JSON.parse(raw);
+    } catch {
+      // Corrupt file falls through to the discard below
+    }
+    if (isValidPendingJob(intent)) return intent;
+    app.error(`${PLUGIN_ID}: discarding invalid restart journal ${file}`);
+    clearPendingJob();
+    return null;
+  }
+
+  /**
+   * Removes the restart journal (job settled, user cancelled, or the
+   * journal was invalid). A missing file is not an error.
+   */
+  function clearPendingJob() {
+    const file = pendingJobPath();
+    if (!file) return;
+    try {
+      fs.unlinkSync(file);
+    } catch {
+      // Already gone
     }
   }
 
@@ -682,14 +828,20 @@ module.exports = (app) => {
 
   /**
    * Builds the corridor for a coordinate list, updates MBTiles
-   * metadata, filters out already-cached tiles and starts the queue.
+   * metadata, filters out already-cached tiles, journals the job
+   * intent for restart-safe resume and starts the queue.
    *
    * @param {Array<{lat: number, lon: number}>} coordinates
    * @param {string} routeName - Display name for the job
    * @param {boolean} forceOnMetered - Metered override (SPEC Addendum 4)
+   * @param {object} [geometryConfig] - Geometry the corridor is built
+   *   from; defaults to the live config. Resume passes the journaled
+   *   snapshot so a restarted job keeps its original shape even if
+   *   the configuration changed in between.
    * @returns {{totalTiles: number}}
    */
-  function startJob(coordinates, routeName, forceOnMetered) {
+  function startJob(coordinates, routeName, forceOnMetered, geometryConfig) {
+    const geometry = geometryConfig ?? config;
     if (!downloader) {
       throw httpError(503, "Downloader not started");
     }
@@ -703,7 +855,7 @@ module.exports = (app) => {
       throw httpError(500, `Failed to open tile store: ${err.message}`);
     }
 
-    const { tiles, bounds } = corridorTiles(coordinates, config);
+    const { tiles, bounds } = corridorTiles(coordinates, geometry);
     if (tiles.length === 0) {
       throw httpError(400, "No valid coordinates to fetch");
     }
@@ -717,14 +869,69 @@ module.exports = (app) => {
     // API discovery handoff: bounds and zoom range must reflect the
     // corridor before the consumer plugin sees new tiles.
     if (bounds) store.setBounds(bounds);
-    store.setZoomLevels(config.minZoom, config.maxZoom);
+    store.setZoomLevels(geometry.minZoom, geometry.maxZoom);
 
     // Skip what we already have so re-runs only fetch the delta.
     const pending = tiles.filter((t) => !store.hasTile(t.z, t.x, t.yTms));
 
+    persistPendingJob({
+      version: PENDING_JOB_VERSION,
+      outputPath: config.outputPath,
+      routeName,
+      forceOnMetered: forceOnMetered === true,
+      coordinates,
+      minZoom: geometry.minZoom,
+      maxZoom: geometry.maxZoom,
+      strategicMarginNM: geometry.strategicMarginNM,
+      tacticalMarginNM: geometry.tacticalMarginNM,
+      approachRadiusNM: geometry.approachRadiusNM,
+    });
+
     downloader.start(pending, { routeName, forceOnMetered });
     lastRouteName = routeName;
     return { totalTiles: pending.length };
+  }
+
+  /**
+   * Resumes a passage job journaled before the last shutdown: the
+   * corridor is rebuilt from the journaled intent — not the possibly
+   * changed live config — and filtered against the tile cache, so only
+   * the tiles the interrupted job still lacked are fetched. A journal
+   * targeting a different output file is kept but not resumed: its
+   * corridor resumes if the configuration is switched back.
+   */
+  function resumePendingJob() {
+    const intent = readPendingJob();
+    if (!intent) return;
+    if (path.resolve(intent.outputPath) !== path.resolve(config.outputPath)) {
+      app.debug(
+        `${PLUGIN_ID}: pending job "${intent.routeName}" targets ${intent.outputPath}; not resuming into ${config.outputPath}`,
+      );
+      return;
+    }
+    const geometry = {
+      ...config,
+      minZoom: intent.minZoom,
+      maxZoom: intent.maxZoom,
+      strategicMarginNM: intent.strategicMarginNM,
+      tacticalMarginNM: intent.tacticalMarginNM,
+      approachRadiusNM: intent.approachRadiusNM,
+    };
+    try {
+      startJob(
+        intent.coordinates,
+        intent.routeName,
+        intent.forceOnMetered,
+        geometry,
+      );
+      app.debug(
+        `${PLUGIN_ID}: resumed corridor "${intent.routeName}" after restart`,
+      );
+    } catch (err) {
+      app.error(
+        `${PLUGIN_ID}: resume of "${intent.routeName}" failed: ${err.message}`,
+      );
+    }
   }
 
   /**
@@ -772,6 +979,7 @@ module.exports = (app) => {
           ? store.sizeBytes()
           : fileSizeBytes(config ? config.outputPath : ""),
         outputPath: config ? config.outputPath : null,
+        resumable: hasPendingJob(),
       });
     });
 
@@ -815,6 +1023,8 @@ module.exports = (app) => {
 
     router.post("/cancel", (_req, res) => {
       downloader?.cancel();
+      // A cancelled corridor must not resurrect after a restart.
+      clearPendingJob();
       res.json({ status: "cancelled" });
     });
 
@@ -849,6 +1059,8 @@ module.exports.DEFAULT_APPROACH_RADIUS_NM = DEFAULT_APPROACH_RADIUS_NM;
 module.exports.MAX_QUEUE_SIZE = MAX_QUEUE_SIZE;
 module.exports.RECOVERY_TRIGGER_NM = RECOVERY_TRIGGER_NM;
 module.exports.RECOVERY_BANDS = RECOVERY_BANDS;
+module.exports.PENDING_JOB_VERSION = PENDING_JOB_VERSION;
+module.exports.PENDING_JOB_FILENAME = PENDING_JOB_FILENAME;
 module.exports.CHARTS_PROVIDER_ID = CHARTS_PROVIDER_ID;
 module.exports.CHARTS_REFRESH_GLOBAL = CHARTS_REFRESH_GLOBAL;
 module.exports.expandHome = expandHome;

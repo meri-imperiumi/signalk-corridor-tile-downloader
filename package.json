@@ -1,5 +1,5 @@
 {
-  "name": "signalk-corridor-tile-downloader",
+  "name": "@meri-imperiumi/signalk-corridor-tile-downloader",
   "version": "0.1.0",
   "description": "Pre-cache marine chart tile corridors into MBTiles for offline navigation",
   "main": "index.js",

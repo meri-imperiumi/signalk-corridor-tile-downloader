@@ -27,6 +27,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Restart-safe downloads: passage corridor jobs (active route, GPX,
+  custom target) are journaled to the plugin data directory and
+  resumed automatically after a server restart or plugin reload. The
+  journal stores the job intent (coordinates, route name, metered
+  override, zoom/margin snapshot); on resume the corridor is rebuilt
+  from that snapshot and filtered against the MBTiles cache, so only
+  tiles the interrupted job still lacked are fetched. Cancelling a
+  job retires its journal, while a job interrupted by shutdown —
+  including one parked in the connectivity circuit breaker — resumes
+  under the same policies. `GET /status` exposes `resumable`, and the
+  web UI marks journaled jobs as restart-safe.
 - Manual target coordinate trigger: a new "Target coordinate corridor"
   panel fetches the multi-tier corridor around a single lat/lon point
   when there is no active route or GPX file. Input is validated

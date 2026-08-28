@@ -110,6 +110,7 @@ class CorridorProgress extends HTMLElement {
           <span id="recovery"></span>
           <span id="rate"></span>
           <span id="eta">ETA —</span>
+          <span id="resume"></span>
         </div>
         <div class="notice hidden" id="notice"></div>
         <div class="actions hidden" id="actions">
@@ -137,6 +138,8 @@ class CorridorProgress extends HTMLElement {
     this.rateEl = shadow.getElementById("rate");
     /** @type {HTMLElement} */
     this.etaEl = shadow.getElementById("eta");
+    /** @type {HTMLElement} */
+    this.resumeEl = shadow.getElementById("resume");
     /** @type {HTMLElement} */
     this.noticeEl = shadow.getElementById("notice");
     /** @type {HTMLElement} */
@@ -174,6 +177,10 @@ class CorridorProgress extends HTMLElement {
     this.etaEl.textContent = status.isDownloading
       ? `ETA ${formatEta(status.etaMs)}`
       : "";
+    // Journaled passage jobs continue where they left off after a
+    // server restart (restart-safe resume)
+    this.resumeEl.textContent =
+      status.isDownloading && status.resumable ? "restart-safe" : "";
 
     // Circuit breaker / rate-limit notices (Addendums 2-3)
     let notice = "";
