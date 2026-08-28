@@ -7,13 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Open Waters vector map support (the `vector.md` blueprint): the
+  `Open Waters Seamap` tile provider is back — and now the default —
+  sourcing Mapbox Vector Tiles from
+  `tiles.openwaters.io/seamap/{z}/{x}/{y}.pbf` (native zooms 0-14,
+  clamped automatically). Vector bodies are validated as protobuf
+  messages, stored gzip-compressed (the MBTiles vector convention),
+  and a legitimately empty tile — the service answers HTTP 204 over
+  open ocean — is cached as a gzipped empty MVT so corridor re-runs
+  and JIT recovery checks do not refetch it. An HTTP 204 stays a
+  failure on the raster profile.
+- `format` and `vector_layers` MBTiles metadata: a vector corridor
+  writes `format=pbf` plus the seamap source-layer ids (from the
+  provider's TileJSON) at job start, so signalk-charts-provider-simple
+  serves tiles as `application/x-protobuf` (with `Content-Encoding:
+  gzip` for the compressed blobs) and advertises the layer ids as
+  `chartLayers` for MapLibre clients. The `format` row is only seeded
+  on fresh files — reopening a pbf cache no longer resets it to png.
+- Format guard: one cache file carries one tile format. Starting a
+  vector download against a filled png cache (or vice versa) is
+  rejected with HTTP 409 and a message pointing at a separate output
+  path; an empty file adopts the active provider's format freely.
+- Offline style assets under `public/open-waters/`, fetched by the new
+  `scripts/fetch-open-waters-assets.mjs`: a self-contained
+  `style.json` (the seamap chart symbology layers extracted from the
+  published Open Waters style, re-pointed at the locally served
+  corridor cache via `/signalk/v1/api/resources/charts/`), the
+  `freenauticalchart` sprite sheet (all four variants) and the Noto
+  Sans Regular/Italic glyph PBF ranges. All URLs are root-relative so
+  the assets work at whatever address the boat network uses for the
+  Signal K server — point MapLibre at
+  `/plugins/signalk-corridor-tile-downloader/open-waters/style.json`.
+- `GET /status` now reports the active `format` (`pbf`/`png`), and the
+  web UI status header shows the provider with a `vector`/`raster`
+  suffix.
+
 ### Fixed
 
-- Downloads no longer fail on every tile: the default Open Waters
-  Seamap provider was removed after that service migrated to
-  vector-only `.pbf` tiles (its old raster PNG endpoints now answer
-  404). OpenSeaMap is the default raster provider again; saved configs
-  naming Open Waters Seamap migrate to OpenSeaMap automatically.
 - Empty-ocean overlay tiles are no longer rejected as rate-limit
   placeholders: fully transparent OpenSeaMap ocean tiles measure ~334
   bytes, below the old 500-byte floor. Tile bodies are now validated
@@ -99,28 +131,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   monitor with ETA and cancel, and a storage panel with guarded VACUUM
   — styled per the Signal K "Tactical Sci-Fi" spec with passive
   day/night mode reactivity.
-- Tile provider selection (SPEC Addendum 6): new `tileProvider`
-  setting (`Open Waters Seamap` default, or `OpenSeaMap`) drives the
-  default tile server URL — `tiles.openwaters.io/seamap` or
-  `tiles.openseamap.org/seamark` — so downloads source modern
-  Open Waters raster PNGs while legacy installs keep their OpenSeaMap
-  source until they switch. `tileServerUrl` becomes an optional custom
-  override (empty or a stored provider default follows the selection);
-  the provider also sets its payload-validation profile, and `GET
-  /status` and the web UI status header surface the active provider.
-  The output remains a universal raster PNG MBTiles overlay
-  (`format=png`, `type=overlay`) consumable by any XYZ tile client.
+- Tile provider selection (SPEC Addendum 6): the `tileProvider`
+  setting drives the default tile server URL, its payload-validation
+  profile and its tile format, while `tileServerUrl` becomes an
+  optional custom override (empty or a stored provider default —
+  current or retired — follows the selection). `GET /status` and the
+  web UI status header surface the active provider.
 - Defensive media-type validation (SPEC Addendum 6): successful
-  responses must carry exactly an `image/png` Content-Type
-  (parameters and case tolerated). JSON or HTML bodies — providers'
-  rate-limit/error responses — are dropped, logged as failures, and
-  trigger the escalating backoff throttle; the tiny-placeholder
-  threshold is per provider (500 bytes for OpenSeaMap, 300 for Open
-  Waters).
+  responses must carry one of the active format profile's exact
+  Content-Types (parameters and case tolerated). JSON or HTML bodies
+  — providers' rate-limit/error responses — are dropped, logged as
+  failures, and trigger the escalating backoff throttle.
 - Test suite: tile math, tiered corridor geometry, MBTiles store
   (including concurrent-reader WAL check), downloader behavior
   (throttle, backoff, rate-limit escalation, circuit breaker,
-  cancellation), plugin REST handlers, and webapp pure modules.
+  cancellation), plugin REST handlers, webapp pure modules, and the
+  committed Open Waters style assets.
 
 ### Changed
 

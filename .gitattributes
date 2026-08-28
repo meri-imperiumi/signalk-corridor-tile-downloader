@@ -18,3 +18,5 @@
 *.woff2 binary
 *.ttf binary
 *.otf binary
+*.pbf binary
+*.mbtiles binary

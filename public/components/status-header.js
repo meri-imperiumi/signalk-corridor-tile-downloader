@@ -79,7 +79,7 @@ class CtdStatusHeader extends HTMLElement {
     if (status) {
       this.jobEl.textContent = jobLabel(status);
       this.routeEl.textContent = status.activeRouteName || "—";
-      this.sourceEl.textContent = status.tileProvider || "—";
+      this.sourceEl.textContent = sourceLabel(status);
       this.cacheEl.textContent = formatSI(status.dbSizeBytes, "B");
       this.cardEl.className = `sk-card ${themeFor(status, online)}`;
     } else if (!online) {
@@ -87,6 +87,14 @@ class CtdStatusHeader extends HTMLElement {
       this.cardEl.className = "sk-card theme-red";
     }
   }
+}
+
+/** Source cell label: provider plus its tile format. */
+function sourceLabel(status) {
+  const provider = status.tileProvider || "—";
+  if (status.format === "pbf") return `${provider} · vector`;
+  if (status.format === "png") return `${provider} · raster`;
+  return provider;
 }
 
 /** Maps job state to the header badge text. */

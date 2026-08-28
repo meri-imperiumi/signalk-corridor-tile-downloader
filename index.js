@@ -34,31 +34,70 @@ const PLUGIN_ID = "signalk-corridor-tile-downloader";
 const DEFAULT_OUTPUT_PATH = "~/.signalk/charts-simple/passage_cache.mbtiles";
 
 /**
- * Supported seamark overlay providers (SPEC Addendum 6). Each entry
- * defines the default slippy URL template and the defensive-fetching
- * profile for its responses:
+ * Supported seamark overlay providers (SPEC Addendum 6, vector
+ * follow-up). Each entry defines the default slippy URL template and
+ * its tile format profile:
  *
- * Tile providers (SPEC Addendum 6). Open Waters Seamap was removed
- * in 2026: the service migrated to vector `.pbf` tiles and no longer
- * serves raster PNGs at all, which this plugin's zero-dependency
- * raster pipeline (and its charts-provider-simple consumer) requires.
- * Saved configs naming the dead provider fall back to OpenSeaMap via
- * `resolveConfig`; other raster sources can be used through the
- * custom `tileServerUrl` template.
+ * - Open Waters Seamap serves Mapbox Vector Tiles (`.pbf`, zooms 0-14).
+ *   Bodies are validated as protobuf, stored gzip-compressed, and the
+ *   MBTiles `format` metadata is set to `pbf` so charts-provider-simple
+ *   serves them as `application/x-protobuf` for MapLibre clients.
+ * - OpenSeaMap serves raster PNGs (`format=png`).
+ *
+ * Custom raster or vector sources can be used through the custom
+ * `tileServerUrl` template; a `.pbf` template selects the vector
+ * profile automatically.
  */
 const TILE_PROVIDERS = {
+  "Open Waters Seamap": {
+    urlTemplate: "https://tiles.openwaters.io/seamap/{z}/{x}/{y}.pbf",
+    format: "pbf",
+    vectorLayers: [
+      "land",
+      "light",
+      "sea_area",
+      "seamark",
+      "water",
+      "waterway",
+      "wetland",
+    ],
+    maxZoom: 14,
+  },
   OpenSeaMap: {
     urlTemplate: "https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png",
+    format: "png",
   },
 };
 
-const DEFAULT_TILE_PROVIDER = "OpenSeaMap";
+const DEFAULT_TILE_PROVIDER = "Open Waters Seamap";
+
+/**
+ * Infers the tile format profile from a slippy URL template: a `.pbf`
+ * path segment selects the vector profile, anything else the raster
+ * one. Used for custom tile server URLs where no provider entry
+ * applies.
+ *
+ * @param {string} urlTemplate
+ * @returns {"png"|"pbf"}
+ */
+function formatForUrlTemplate(urlTemplate) {
+  return /^https?:\/\/.*\{y\}\.pbf(?:\?.*)?$/.test(urlTemplate) ? "pbf" : "png";
+}
+
+/**
+ * Retired default templates, mapped to their provider: a saved config
+ * naming one follows the provider selection (and its current default)
+ * instead of clinging to the dead endpoint as a "custom" URL.
+ */
+const RETIRED_URL_TEMPLATES = new Map([
+  ["https://tiles.openwaters.io/seamap/{z}/{x}/{y}.png", "Open Waters Seamap"],
+]);
 
 /**
  * Finds the provider whose default URL template matches the given
  * stored value, so a saved template that merely mirrors a provider
- * default keeps following the provider selection instead of being
- * mistaken for a custom override.
+ * default (current or retired) keeps following the provider selection
+ * instead of being mistaken for a custom override.
  *
  * @param {string} urlTemplate
  * @returns {string|null} Provider name
@@ -67,7 +106,7 @@ function providerForUrlTemplate(urlTemplate) {
   for (const [name, provider] of Object.entries(TILE_PROVIDERS)) {
     if (provider.urlTemplate === urlTemplate) return name;
   }
-  return null;
+  return RETIRED_URL_TEMPLATES.get(urlTemplate) ?? null;
 }
 
 const DEFAULT_USER_AGENT = "SignalK-Corridor-Downloader/1.0";
@@ -133,12 +172,15 @@ function expandHome(p) {
  * Normalizes plugin configuration, applying defaults and clamps.
  *
  * Tile provider resolution (SPEC Addendum 6): an explicit
- * `tileProvider` selection drives the default URL template. A
- * `tileServerUrl` that is empty or equal to any provider default is
- * "derived" and follows the selection; anything else is a custom
- * override. Legacy configs (no `tileProvider` saved) infer the
- * provider from a matching stored template, so pre-Addendum-6
- * OpenSeaMap installs keep their source until the user switches.
+ * `tileProvider` selection drives the default URL template, its tile
+ * format profile (`pbf` vector for Open Waters Seamap, `png` raster
+ * for OpenSeaMap) and — for the vector provider — the source-layer ids
+ * advertised to MapLibre clients through the MBTiles `vector_layers`
+ * metadata. A `tileServerUrl` that is empty or equal to any provider
+ * default is "derived" and follows the selection; anything else is a
+ * custom override whose format is inferred from the template (a
+ * `{y}.pbf` path is vector). The vector provider's native zoom ceiling
+ * (14) clamps the configured maxZoom when its default URL is in use.
  *
  * @param {object} [options] - Raw configuration from the admin UI
  * @returns {object} Resolved configuration
@@ -161,15 +203,24 @@ function resolveConfig(options = {}) {
   // custom: it follows the provider selection (SPEC Addendum 6).
   const isCustomUrl =
     storedUrl !== "" && providerForUrlTemplate(storedUrl) == null;
-  let tileServerUrl = isCustomUrl
-    ? storedUrl
-    : TILE_PROVIDERS[tileProvider].urlTemplate;
+  const provider = TILE_PROVIDERS[tileProvider];
+  let tileServerUrl = isCustomUrl ? storedUrl : provider.urlTemplate;
   if (
     !tileServerUrl.includes("{z}") ||
     !tileServerUrl.includes("{x}") ||
     !tileServerUrl.includes("{y}")
   ) {
-    tileServerUrl = TILE_PROVIDERS[tileProvider].urlTemplate;
+    tileServerUrl = provider.urlTemplate;
+  }
+
+  const format = isCustomUrl
+    ? formatForUrlTemplate(tileServerUrl)
+    : provider.format;
+  const vectorLayers =
+    !isCustomUrl && format === "pbf" ? provider.vectorLayers : null;
+  if (!isCustomUrl && provider.maxZoom != null) {
+    maxZoom = Math.min(maxZoom, provider.maxZoom);
+    if (minZoom > maxZoom) minZoom = maxZoom;
   }
 
   return {
@@ -192,6 +243,8 @@ function resolveConfig(options = {}) {
     allowRecoveryOnMetered: options.allowRecoveryOnMetered !== false,
     tileProvider,
     tileServerUrl,
+    format,
+    vectorLayers,
     userAgent: String(options.userAgent || DEFAULT_USER_AGENT),
   };
 }
@@ -316,6 +369,8 @@ module.exports = (app) => {
         maxZoom: {
           type: "integer",
           title: "Maximum zoom",
+          description:
+            "Clamped to the provider's native ceiling (Open Waters Seamap serves up to z14)",
           default: 14,
         },
         throttleMs: {
@@ -329,15 +384,15 @@ module.exports = (app) => {
           type: "string",
           title: "Tile provider",
           description:
-            "Which seamark overlay provider to download. Open Waters Seamap was removed after that service switched to vector-only tiles; the custom tile server URL below accepts any raster PNG source",
-          enum: ["OpenSeaMap"],
+            "Open Waters Seamap serves vector .pbf tiles (MapLibre clients, format=pbf, native zooms 0-14); OpenSeaMap serves the raster PNG overlay. The tile format must match the cache file: switching formats on a filled cache is rejected until you pick a new output path",
+          enum: ["Open Waters Seamap", "OpenSeaMap"],
           default: DEFAULT_TILE_PROVIDER,
         },
         tileServerUrl: {
           type: "string",
           title: "Custom tile server URL template",
           description:
-            "Optional slippy tile URL with {z}/{x}/{y} placeholders. Leave empty to follow the selected provider's default URL",
+            "Optional slippy tile URL with {z}/{x}/{y} placeholders. Leave empty to follow the selected provider's default URL. A template ending in {y}.pbf is treated as a vector source (format=pbf)",
           default: "",
         },
         userAgent: {
@@ -380,6 +435,7 @@ module.exports = (app) => {
       downloader = createDownloader({
         getStore: () => store,
         tileServerUrl: config.tileServerUrl,
+        format: config.format,
         userAgent: config.userAgent,
         throttleMs: config.throttleMs,
         allowRecoveryOnMetered: config.allowRecoveryOnMetered,
@@ -866,6 +922,23 @@ module.exports = (app) => {
       );
     }
 
+    // One cache file carries one tile format: the consumer plugin picks
+    // its Content-Type from the `format` metadata row, so mixing png and
+    // pbf blobs would corrupt both. An empty file adopts the active
+    // provider's format; a filled one refuses to switch (the user points
+    // outputPath at a fresh file instead).
+    const storedFormat = store.getMetadata("format");
+    if (store.hasAnyTile() && storedFormat !== config.format) {
+      throw httpError(
+        409,
+        `Cache at ${config.outputPath} holds ${storedFormat} tiles, but the ${config.tileProvider} provider downloads ${config.format}; use a different output path for ${config.format} tiles`,
+      );
+    }
+    store.setFormat(config.format);
+    if (config.vectorLayers) {
+      store.setVectorLayers(config.vectorLayers);
+    }
+
     // API discovery handoff: bounds and zoom range must reflect the
     // corridor before the consumer plugin sees new tiles.
     if (bounds) store.setBounds(bounds);
@@ -975,6 +1048,7 @@ module.exports = (app) => {
           : { isDownloading: false, state: "idle" }),
         activeRouteName: lastRouteName,
         tileProvider: config ? config.tileProvider : null,
+        format: config ? config.format : null,
         dbSizeBytes: store
           ? store.sizeBytes()
           : fileSizeBytes(config ? config.outputPath : ""),
@@ -1065,3 +1139,4 @@ module.exports.CHARTS_PROVIDER_ID = CHARTS_PROVIDER_ID;
 module.exports.CHARTS_REFRESH_GLOBAL = CHARTS_REFRESH_GLOBAL;
 module.exports.expandHome = expandHome;
 module.exports.resolveConfig = resolveConfig;
+module.exports.formatForUrlTemplate = formatForUrlTemplate;

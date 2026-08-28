@@ -88,6 +88,27 @@ const pngHeaders = {
   get: (name) => (name.toLowerCase() === "content-type" ? "image/png" : null),
 };
 
+/** Realistic application/x-protobuf response headers. */
+const pbfHeaders = {
+  get: (name) =>
+    name.toLowerCase() === "content-type" ? "application/x-protobuf" : null,
+};
+
+/** Minimal Mapbox Vector Tile: one layer named "seamark". */
+const MVT = Buffer.concat([
+  Buffer.from([0x1a, 0x09, 0x12, 0x07]), // field 3 (layers), len 9: field 2 (name)
+  Buffer.from("seamark"),
+]);
+
+function okPbfFetch() {
+  return Promise.resolve({
+    ok: true,
+    status: 200,
+    headers: pbfHeaders,
+    arrayBuffer: async () => MVT,
+  });
+}
+
 function okFetch() {
   return Promise.resolve({
     ok: true,
@@ -190,6 +211,9 @@ describe("plugin", () => {
       throttleMs: 0,
       fetch: okFetch,
       sleep: () => Promise.resolve(),
+      // The raster (OpenSeaMap) pipeline is the default test bed; the
+      // vector provider has its own tests below
+      tileProvider: "OpenSeaMap",
       ...overrides,
     });
   }
@@ -216,6 +240,7 @@ describe("plugin", () => {
     assert.equal(res.body.outputPath, dbPath);
     assert.equal(res.body.activeRouteName, null);
     assert.equal(res.body.tileProvider, "OpenSeaMap");
+    assert.equal(res.body.format, "png");
   });
 
   test("cache file is created lazily with real bounds on first fetch", () => {
@@ -514,8 +539,140 @@ describe("plugin", () => {
       fetch.calls.every((url) =>
         url.startsWith("https://tiles.openseamap.org/seamark/"),
       ),
-      "default provider is OpenSeaMap",
+      "selected provider is OpenSeaMap",
     );
+  });
+
+  test("vector corridor downloads pbf tiles into a pbf cache", async () => {
+    const calls = [];
+    const pbfFetch = (url) => {
+      calls.push(url);
+      return okPbfFetch();
+    };
+    startWithTestHooks({
+      tileProvider: "Open Waters Seamap",
+      fetch: pbfFetch,
+    });
+    plugin.registerWithRouter(app.router);
+
+    const status = makeRes();
+    route(app, "get", "/status")({}, status);
+    assert.equal(status.body.format, "pbf");
+    assert.equal(status.body.tileProvider, "Open Waters Seamap");
+
+    const res = makeRes();
+    route(
+      app,
+      "post",
+      "/fetch-target",
+    )({ body: { coordinates: [{ lat: 0, lon: 0 }] } }, res);
+    assert.equal(res.statusCode, 200);
+    await waitUntil(() => {
+      const s = makeRes();
+      route(app, "get", "/status")({}, s);
+      return s.body.state === "completed";
+    });
+    assert.ok(calls.length > 0);
+    assert.ok(
+      calls.every((url) => url.endsWith(".pbf")),
+      "vector provider URL template used",
+    );
+
+    const reader = new DatabaseSync(dbPath);
+    const meta = Object.fromEntries(
+      reader
+        .prepare("SELECT name, value FROM metadata")
+        .all()
+        .map((r) => [r.name, r.value]),
+    );
+    const rows = reader.prepare("SELECT tile_data FROM tiles").all();
+    reader.close();
+    assert.equal(meta.format, "pbf");
+    assert.deepEqual(
+      JSON.parse(meta.vector_layers).map((l) => l.id),
+      pluginFactory.TILE_PROVIDERS["Open Waters Seamap"].vectorLayers,
+    );
+    // Stored blobs are gzip-wrapped (the MBTiles vector convention the
+    // consumer serves with Content-Encoding: gzip)
+    assert.ok(rows.length > 0);
+    for (const row of rows) {
+      assert.equal(row.tile_data[0], 0x1f);
+      assert.equal(row.tile_data[1], 0x8b);
+    }
+  });
+
+  test("empty vector tiles (HTTP 204) are cached as gzipped empties", async () => {
+    startWithTestHooks({
+      tileProvider: "Open Waters Seamap",
+      fetch: () =>
+        Promise.resolve({
+          ok: true,
+          status: 204,
+          headers: pbfHeaders,
+          arrayBuffer: async () => Buffer.alloc(0),
+        }),
+    });
+    plugin.registerWithRouter(app.router);
+
+    const res = makeRes();
+    route(
+      app,
+      "post",
+      "/fetch-target",
+    )({ body: { coordinates: [{ lat: 0, lon: 0 }] } }, res);
+    assert.equal(res.statusCode, 200);
+    await waitUntil(() => {
+      const s = makeRes();
+      route(app, "get", "/status")({}, s);
+      return s.body.state === "completed";
+    });
+    const done = makeRes();
+    route(app, "get", "/status")({}, done);
+    assert.equal(done.body.completed, res.body.totalTiles);
+
+    // A stored empty tile keeps recovery checks from refetching it
+    const reader = new DatabaseSync(dbPath);
+    const rows = reader.prepare("SELECT tile_data FROM tiles").all();
+    reader.close();
+    assert.equal(rows.length, res.body.totalTiles);
+    for (const row of rows) {
+      assert.equal(row.tile_data[0], 0x1f);
+      assert.equal(row.tile_data[1], 0x8b);
+    }
+  });
+
+  test("a filled png cache refuses vector downloads (format guard)", async () => {
+    startWithTestHooks();
+    plugin.registerWithRouter(app.router);
+    const res = makeRes();
+    route(
+      app,
+      "post",
+      "/fetch-target",
+    )({ body: { coordinates: [{ lat: 0, lon: 0 }] } }, res);
+    assert.equal(res.statusCode, 200);
+    await waitUntil(() => {
+      const s = makeRes();
+      route(app, "get", "/status")({}, s);
+      return s.body.state === "completed";
+    });
+
+    // Switch to the vector provider against the same filled png file
+    app.router.routes.length = 0;
+    plugin = pluginFactory(app);
+    startWithTestHooks({
+      tileProvider: "Open Waters Seamap",
+      fetch: () => okPbfFetch(),
+    });
+    plugin.registerWithRouter(app.router);
+    const busy = makeRes();
+    route(
+      app,
+      "post",
+      "/fetch-target",
+    )({ body: { coordinates: [{ lat: 0, lon: 0 }] } }, busy);
+    assert.equal(busy.statusCode, 409);
+    assert.match(busy.body.message, /holds png tiles/);
   });
 
   test("stop() closes the store (further fetches are 503)", () => {
@@ -1080,11 +1237,22 @@ describe("configuration", () => {
     assert.equal(config.minZoom, 8);
     assert.equal(config.maxZoom, 14);
     assert.equal(config.throttleMs, 500);
-    // OpenSeaMap is the default raster provider (Open Waters went vector-only)
-    assert.equal(config.tileProvider, "OpenSeaMap");
+    // The vector Open Waters Seamap provider is the default (its
+    // native zoom ceiling clamps maxZoom to 14)
+    assert.equal(config.tileProvider, "Open Waters Seamap");
+    assert.equal(config.format, "pbf");
+    assert.deepEqual(config.vectorLayers, [
+      "land",
+      "light",
+      "sea_area",
+      "seamark",
+      "water",
+      "waterway",
+      "wetland",
+    ]);
     assert.equal(
       config.tileServerUrl,
-      "https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png",
+      "https://tiles.openwaters.io/seamap/{z}/{x}/{y}.pbf",
     );
     assert.equal(config.userAgent, "SignalK-Corridor-Downloader/1.0");
     assert.ok(config.outputPath.endsWith("passage_cache.mbtiles"));
@@ -1097,6 +1265,15 @@ describe("configuration", () => {
     });
     assert.equal(openSeaMap.tileProvider, "OpenSeaMap");
     assert.equal(openSeaMap.tileServerUrl, providers.OpenSeaMap.urlTemplate);
+    assert.equal(openSeaMap.format, "png");
+    assert.equal(openSeaMap.vectorLayers, null);
+
+    const openWaters = pluginFactory.resolveConfig({
+      tileProvider: "Open Waters Seamap",
+    });
+    assert.equal(openWaters.tileServerUrl, openWaters.tileServerUrl);
+    assert.equal(openWaters.format, "pbf");
+    assert.ok(openWaters.vectorLayers.includes("seamark"));
 
     // A stored default template is derived, not custom: it follows the
     // provider selection
@@ -1114,14 +1291,19 @@ describe("configuration", () => {
       "https://tiles.example.org/{z}/{x}/{y}.png",
     );
 
-    // Legacy configs naming the retired vector-only Open Waters
-    // provider migrate to the OpenSeaMap default
+    // Legacy configs naming the retired Open Waters *raster* endpoint
+    // (the pre-vector .png default) follow the selection to the current
+    // vector template instead of clinging to the dead endpoint
     const legacy = pluginFactory.resolveConfig({
       tileProvider: "Open Waters Seamap",
-      tileServerUrl: "",
+      tileServerUrl: "https://tiles.openwaters.io/seamap/{z}/{x}/{y}.png",
     });
-    assert.equal(legacy.tileProvider, "OpenSeaMap");
-    assert.equal(legacy.tileServerUrl, providers.OpenSeaMap.urlTemplate);
+    assert.equal(legacy.tileProvider, "Open Waters Seamap");
+    assert.equal(
+      legacy.tileServerUrl,
+      providers["Open Waters Seamap"].urlTemplate,
+    );
+    assert.equal(legacy.format, "pbf");
 
     // Unknown values fall back to the default provider
     assert.equal(
@@ -1130,11 +1312,43 @@ describe("configuration", () => {
     );
   });
 
+  test("the vector provider's native zoom ceiling clamps maxZoom", () => {
+    const config = pluginFactory.resolveConfig({
+      tileProvider: "Open Waters Seamap",
+      minZoom: 10,
+      maxZoom: 17,
+    });
+    assert.equal(config.maxZoom, 14);
+    assert.equal(config.minZoom, 10);
+
+    // The raster provider has no ceiling beyond the general clamp
+    const raster = pluginFactory.resolveConfig({
+      tileProvider: "OpenSeaMap",
+      minZoom: 10,
+      maxZoom: 17,
+    });
+    assert.equal(raster.maxZoom, 17);
+  });
+
+  test("custom URLs infer the format from the template", () => {
+    const vector = pluginFactory.resolveConfig({
+      tileServerUrl: "https://tiles.example.org/mvt/{z}/{x}/{y}.pbf",
+    });
+    assert.equal(vector.format, "pbf");
+    assert.equal(vector.vectorLayers, null); // schema unknown to us
+
+    const raster = pluginFactory.resolveConfig({
+      tileServerUrl: "https://tiles.example.org/{z}/{x}/{y}.png",
+    });
+    assert.equal(raster.format, "png");
+  });
+
   test("legacy configs without tileProvider keep their OpenSeaMap source", () => {
     const config = pluginFactory.resolveConfig({
       tileServerUrl: pluginFactory.TILE_PROVIDERS.OpenSeaMap.urlTemplate,
     });
     assert.equal(config.tileProvider, "OpenSeaMap");
+    assert.equal(config.format, "png");
     assert.equal(
       config.tileServerUrl,
       pluginFactory.TILE_PROVIDERS.OpenSeaMap.urlTemplate,

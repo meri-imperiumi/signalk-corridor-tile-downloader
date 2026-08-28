@@ -81,6 +81,34 @@ describe("MbTilesStore", () => {
     store.close();
   });
 
+  test("vector caches: setFormat/setVectorLayers and format preservation", () => {
+    const store = new MbTilesStore(dbPath);
+    assert.equal(store.getMetadata("format"), "png"); // fresh default
+    store.setFormat("pbf");
+    store.setVectorLayers(["land", "seamark", "water"]);
+    assert.equal(store.getMetadata("format"), "pbf");
+    assert.deepEqual(
+      JSON.parse(store.getMetadata("vector_layers")).map((l) => l.id),
+      ["land", "seamark", "water"],
+    );
+    store.close();
+
+    // Reopening must not reset a pbf cache to the png default: the
+    // consumer serves tiles with the format's Content-Type
+    const reopened = new MbTilesStore(dbPath);
+    assert.equal(reopened.getMetadata("format"), "pbf");
+    assert.equal(reopened.getMetadata("name"), "Signal K Corridor Cache");
+    reopened.close();
+  });
+
+  test("hasAnyTile distinguishes empty caches from filled ones", () => {
+    const store = new MbTilesStore(dbPath);
+    assert.equal(store.hasAnyTile(), false);
+    store.insertTile(8, 1, 1, Buffer.from([1]));
+    assert.equal(store.hasAnyTile(), true);
+    store.close();
+  });
+
   test("reopening does not duplicate metadata rows", () => {
     const first = new MbTilesStore(dbPath);
     first.setBounds([-170.1, -19.2, -159.1, -18.1]);

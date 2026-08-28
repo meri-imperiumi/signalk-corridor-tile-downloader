@@ -76,7 +76,9 @@ class CorridorProgress extends HTMLElement {
           color: var(--text-muted);
           font-variant-numeric: tabular-nums;
         }
-        .stats .failed { color: var(--color-red); }
+        /* Only alarm-red when there is something to report (spec §1: no
+           crying-wolf states) */
+        .stats .failed.has-failures { color: var(--color-red); }
 
         .notice {
           font-family: ui-monospace, "Fira Code", monospace;
@@ -166,6 +168,7 @@ class CorridorProgress extends HTMLElement {
     this.badgeEl.textContent = badgeFor(status);
     this.countsEl.textContent = `${done} / ${total} tiles`;
     this.failedEl.textContent = `${status.failed || 0} failed`;
+    this.failedEl.classList.toggle("has-failures", (status.failed || 0) > 0);
     this.cachedEl.textContent = `${status.skipped || 0} cached`;
     const recoveryPending = status.recoveryPending || 0;
     this.recoveryEl.textContent =

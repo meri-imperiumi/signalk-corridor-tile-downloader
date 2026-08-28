@@ -1,10 +1,13 @@
 const { describe, test } = require("node:test");
 const assert = require("node:assert/strict");
+const { gunzipSync } = require("node:zlib");
 
 const {
   backoffDelay,
   createDownloader,
+  isMvtBody,
   isPngBody,
+  EMPTY_PBF,
   MIN_PNG_BYTES,
   PNG_SIGNATURE,
   RATE_LIMIT_PENALTY_BASE_MS,
@@ -728,5 +731,177 @@ describe("payload validation (Addendum 6)", () => {
     await jobSettled(downloader);
     assert.equal(downloader.status().failed, 1);
     assert.equal(store.inserts.length, 0);
+  });
+});
+
+/** A realistic small Mapbox Vector Tile: one layer named "seamark". */
+const MVT = Buffer.concat([
+  Buffer.from([0x1a, 0x09, 0x12, 0x07]), // field 3 (layers) → field 2 (name)
+  Buffer.from("seamark"),
+]);
+
+/** Realistic application/x-protobuf response headers. */
+const pbfHeaders = {
+  get: (name) =>
+    name.toLowerCase() === "content-type" ? "application/x-protobuf" : null,
+};
+
+/** Response factory for the vector profile. */
+function okPbfResponse(data = MVT) {
+  return {
+    ok: true,
+    status: 200,
+    headers: pbfHeaders,
+    arrayBuffer: async () => data,
+  };
+}
+
+describe("vector tiles (Open Waters Seamap)", () => {
+  test("stores protobuf bodies gzip-wrapped (MBTiles convention)", async () => {
+    const store = fakeStore();
+    const { downloader, calls } = makeDownloader(store, [okPbfResponse()], {
+      tileServerUrl: "https://tiles.openwaters.io/seamap/{z}/{x}/{y}.pbf",
+      format: "pbf",
+    });
+    downloader.start([{ z: 8, x: 1, y: 2, yTms: 3 }]);
+    await jobSettled(downloader);
+
+    assert.equal(downloader.status().completed, 1);
+    assert.equal(store.inserts.length, 1);
+    const stored = store.inserts[0].data;
+    // Gzip magic: charts-provider-simple serves it with
+    // Content-Encoding: gzip and sniffs format=pbf from it
+    assert.equal(stored[0], 0x1f);
+    assert.equal(stored[1], 0x8b);
+    assert.ok(gunzipSync(stored).equals(MVT));
+    // The vector Accept header was sent
+    assert.match(calls[0].init.headers.Accept, /x-protobuf/);
+  });
+
+  test("a body that is already gzipped is validated and stored as-is", async () => {
+    const store = fakeStore();
+    const { gzipSync } = require("node:zlib");
+    const body = gzipSync(MVT);
+    const { downloader } = makeDownloader(store, [okPbfResponse(body)], {
+      format: "pbf",
+    });
+    downloader.start([{ z: 8, x: 1, y: 2, yTms: 3 }]);
+    await jobSettled(downloader);
+
+    assert.equal(downloader.status().completed, 1);
+    assert.ok(store.inserts[0].data.equals(body));
+  });
+
+  test("HTTP 204 over open ocean stores a gzipped empty tile", async () => {
+    const store = fakeStore();
+    const { downloader } = makeDownloader(
+      store,
+      [
+        {
+          ok: true,
+          status: 204,
+          headers: pbfHeaders,
+          arrayBuffer: async () => Buffer.alloc(0),
+        },
+      ],
+      { format: "pbf" },
+    );
+    downloader.start([{ z: 8, x: 1, y: 2, yTms: 3 }]);
+    await jobSettled(downloader);
+
+    // An empty vector tile is a *success*: re-runs and recovery checks
+    // must find it cached instead of refetching forever
+    assert.equal(downloader.status().completed, 1);
+    assert.equal(downloader.status().failed, 0);
+    assert.ok(store.inserts[0].data.equals(EMPTY_PBF));
+  });
+
+  test("204 stays a failure on the raster profile", async () => {
+    const store = fakeStore();
+    const { downloader, sleeps } = makeDownloader(
+      store,
+      [
+        {
+          ok: true,
+          status: 204,
+          headers: { get: () => null },
+          arrayBuffer: async () => Buffer.alloc(0),
+        },
+        bodyResponse("application/json"),
+      ],
+      { maxRetries: 0, format: "png" },
+    );
+    downloader.start([{ z: 8, x: 1, y: 2, yTms: 3 }]);
+    await jobSettled(downloader);
+    assert.equal(downloader.status().failed, 1);
+    assert.equal(store.inserts.length, 0);
+    assert.ok(sleeps.length > 0);
+  });
+
+  test("drops 200 OK JSON bodies and retries after the penalty", async () => {
+    const store = fakeStore();
+    const { downloader, calls, sleeps } = makeDownloader(
+      store,
+      [bodyResponse("application/json"), okPbfResponse()],
+      { format: "pbf" },
+    );
+    downloader.start([{ z: 8, x: 1, y: 2, yTms: 3 }]);
+    await jobSettled(downloader);
+
+    assert.equal(calls.length, 2);
+    assert.deepEqual(sleeps, [RATE_LIMIT_PENALTY_BASE_MS]);
+    assert.equal(downloader.status().completed, 1);
+    assert.equal(store.inserts.length, 1);
+  });
+
+  test("protobuf media types the provider actually uses are accepted", async () => {
+    for (const contentType of [
+      "application/x-protobuf",
+      "application/vnd.mapbox-vector-tile",
+      "application/octet-stream",
+    ]) {
+      const store = fakeStore();
+      const { downloader } = makeDownloader(
+        store,
+        [bodyResponse(contentType, MVT)],
+        { format: "pbf" },
+      );
+      downloader.start([{ z: 8, x: 1, y: 2, yTms: 3 }]);
+      await jobSettled(downloader);
+      assert.equal(downloader.status().completed, 1, `${contentType} accepted`);
+    }
+  });
+
+  test("a protobuf body mislabeled image/png is rejected", async () => {
+    const store = fakeStore();
+    const { downloader } = makeDownloader(
+      store,
+      [bodyResponse("image/png", MVT)],
+      { format: "pbf", maxRetries: 0 },
+    );
+    downloader.start([{ z: 8, x: 1, y: 2, yTms: 3 }]);
+    await jobSettled(downloader);
+    assert.equal(downloader.status().failed, 1);
+    assert.equal(store.inserts.length, 0);
+  });
+});
+
+describe("MVT body sniffing", () => {
+  test("accepts real vector tiles and the empty tile", () => {
+    assert.ok(isMvtBody(MVT));
+    assert.ok(isMvtBody(Buffer.alloc(0)));
+    // A varint-heavy field followed by exact-length payload walks clean
+    assert.ok(
+      isMvtBody(Buffer.from([0x08, 0x96, 0x01])), // field 1 varint 150
+    );
+  });
+
+  test("rejects JSON, HTML and truncated protobuf", () => {
+    assert.ok(!isMvtBody(Buffer.from('{"error":1}')));
+    assert.ok(!isMvtBody(Buffer.from("<html>rate limited</html>")));
+    // Tag promises a 9-byte layer but the body ends early
+    assert.ok(!isMvtBody(Buffer.from([0x1a, 0x09, 0x12])));
+    // Wire type 3 (group) is not valid MVT
+    assert.ok(!isMvtBody(Buffer.from([0x7b, 0x00])));
   });
 });

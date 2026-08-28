@@ -76,6 +76,10 @@ function loadLikeProvider() {
       maxzoom: metadata.maxzoom,
       format: metadata.format ?? "png",
       type,
+      vector_layers: metadata.vector_layers ?? [],
+      chartLayers: metadata.vector_layers
+        ? metadata.vector_layers.map((l) => l.id)
+        : [],
     };
   } finally {
     reader.close();
@@ -105,6 +109,9 @@ function getInfoLikeProvider(reader) {
       case "minzoom":
       case "maxzoom":
         metadata[name] = Number.parseInt(value, 10);
+        break;
+      case "vector_layers":
+        metadata.vector_layers = JSON.parse(value);
         break;
       default:
         metadata[name] = value;
@@ -243,5 +250,61 @@ describe("charts-provider-simple interop", () => {
     } finally {
       reader.close();
     }
+  });
+
+  test("a vector (pbf) corridor loads and serves like the provider does", () => {
+    const { gzipSync, gunzipSync } = require("node:zlib");
+    const mvt = Buffer.concat([
+      Buffer.from([0x1a, 0x09, 0x12, 0x07]),
+      Buffer.from("seamark"),
+    ]);
+    const store = new MbTilesStore(dbPath);
+    store.setFormat("pbf");
+    store.setVectorLayers(["land", "seamark", "water"]);
+    store.setBounds([-170.1, -19.2, -159.1, -18.1]);
+    store.setZoomLevels(8, 14);
+    const bubble = bubbleTiles({ lat: -18.85, lon: -159.78 }, 14, 3);
+    for (const t of bubble) {
+      store.insertTile(t.z, t.x, t.yTms, gzipSync(mvt));
+    }
+    store.close();
+
+    // Loader gate: the chart descriptor a MapLibre client discovers
+    const chart = loadLikeProvider();
+    assert.ok(chart, "provider loads the vector chart");
+    assert.equal(chart.format, "pbf");
+    assert.equal(chart.type, "tilelayer"); // seamap layers are not S-57
+    assert.deepEqual(
+      chart.vector_layers.map((l) => l.id),
+      ["land", "seamark", "water"],
+    );
+
+    // Reader: gzipped blobs served with the provider's pbf headers
+    const reader = openReadOnlyLikeProvider(dbPath);
+    try {
+      const first = bubble[0];
+      const data = getRawTileLikeProvider(reader, first.z, first.x, first.y);
+      assert.ok(data);
+      assert.equal(data[0], 0x1f); // gzip magic
+      assert.equal(data[1], 0x8b);
+      assert.ok(gunzipSync(data).equals(mvt));
+      // Mirrors MBTilesReader.getTile's pbf header logic
+      const headers = {};
+      headers["Content-Type"] = "application/x-protobuf";
+      if (data[0] === 0x1f && data[1] === 0x8b) {
+        headers["Content-Encoding"] = "gzip";
+      }
+      assert.equal(headers["Content-Encoding"], "gzip");
+    } finally {
+      reader.close();
+    }
+
+    // Mirrors sniffFormatFromTiles: gzip magic → pbf
+    const sniffer = new DatabaseSync(dbPath, { readOnly: true });
+    const b = sniffer
+      .prepare("SELECT tile_data FROM tiles LIMIT 1")
+      .get().tile_data;
+    sniffer.close();
+    assert.ok(b[0] === 0x1f && b[1] === 0x8b, "sniffs as pbf");
   });
 });
