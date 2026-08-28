@@ -63,6 +63,15 @@ const RECOVERY_BANDS = [
  */
 const MAX_QUEUE_SIZE = 500000;
 
+/** The consumer plugin that serves our tiles to Freeboard SK. */
+const CHARTS_PROVIDER_ID = "signalk-charts-provider-simple";
+
+/**
+ * In-process refresh hook published by charts-provider-simple on
+ * globalThis (same pattern as signalk-container's manager global).
+ */
+const CHARTS_REFRESH_GLOBAL = "__signalk_chartsProviderRefresh";
+
 /**
  * Expands a leading `~/` to the user's home directory.
  *
@@ -150,6 +159,8 @@ module.exports = (app) => {
   /** Last position the recovery cache was verified against. */
   let lastCheckedPosition = null;
   const unsubscribes = [];
+  /** Chart-provider refresh callback (injectable for tests). */
+  let notifyChartsProvider = defaultNotifyChartsProvider;
 
   const plugin = {
     id: PLUGIN_ID,
@@ -164,7 +175,7 @@ module.exports = (app) => {
           type: "string",
           title: "Output path",
           description:
-            "Absolute path of the .mbtiles file. Must live in the charts directory watched by signalk-charts-provider-simple (default ~/.signalk/charts-simple). A leading ~/ expands to the server user's home. After the very first fetch, restart the charts provider (or toggle any chart in its UI) once so Freeboard discovers the corridor; later downloads appear immediately.",
+            "Absolute path of the .mbtiles file. Must live in the charts directory watched by signalk-charts-provider-simple (default ~/.signalk/charts-simple). A leading ~/ expands to the server user's home. New tiles are picked up automatically when the provider supports refresh; otherwise restart it once after the first fetch.",
           default: DEFAULT_OUTPUT_PATH,
         },
         strategicMarginNM: {
@@ -241,8 +252,13 @@ module.exports = (app) => {
       // `*.mbtiles-wal` sidecars and bounds-less .mbtiles files, so an
       // idle downloader must leave neither on disk.
 
-      // Test hooks (`fetch`, `sleep`) ride along in the raw options,
-      // mirroring the injectable-probe pattern; absent in production.
+      // Test hooks (`fetch`, `sleep`, `notify`) ride along in the raw
+      // options, mirroring the injectable-probe pattern; absent in
+      // production.
+      notifyChartsProvider =
+        typeof options?.notify === "function"
+          ? options.notify
+          : defaultNotifyChartsProvider;
       downloader = createDownloader({
         getStore: () => store,
         tileServerUrl: config.tileServerUrl,
@@ -254,6 +270,13 @@ module.exports = (app) => {
         getInternetState,
         log: (m) => app.debug(`${PLUGIN_ID}: ${m}`),
         onProgress: () => publishStatus(),
+        onSettled: (stats) => {
+          // Charts landed in the file: ask the consumer to rescan so the
+          // corridor shows up in Freeboard without a provider restart.
+          if (stats.completed > 0) {
+            notifyChartsProvider();
+          }
+        },
       });
 
       subscribeToDeltas();
@@ -489,6 +512,53 @@ module.exports = (app) => {
   }
 
   /**
+   * Asks signalk-charts-provider-simple to rescan its charts directory
+   * so tiles written by this plugin get registered — the provider has
+   * no file watcher, so without a rescan a newly created corridor file
+   * stays invisible until its next restart. Prefers the in-process
+   * globalThis hook (no HTTP round-trip, works with server security
+   * enabled); falls back to the provider's POST /refresh endpoint when
+   * the port is known. Best-effort: quiet when the provider or its
+   * refresh capability is absent (older versions).
+   */
+  function defaultNotifyChartsProvider() {
+    const hook = globalThis[CHARTS_REFRESH_GLOBAL];
+    if (typeof hook === "function") {
+      hook()
+        .then((count) =>
+          app.debug(
+            `${PLUGIN_ID}: charts provider refreshed (${count} charts)`,
+          ),
+        )
+        .catch((err) =>
+          app.debug(
+            `${PLUGIN_ID}: charts provider refresh failed: ${err.message}`,
+          ),
+        );
+      return;
+    }
+    const port = app.config?.settings?.port;
+    if (!port) return;
+    fetch(`http://127.0.0.1:${port}/plugins/${CHARTS_PROVIDER_ID}/refresh`, {
+      method: "POST",
+    })
+      .then((res) => {
+        if (res.ok) {
+          app.debug(`${PLUGIN_ID}: charts provider refreshed via REST`);
+        } else {
+          app.debug(
+            `${PLUGIN_ID}: charts provider refresh returned HTTP ${res.status}`,
+          );
+        }
+      })
+      .catch((err) =>
+        app.debug(
+          `${PLUGIN_ID}: charts provider refresh unreachable: ${err.message}`,
+        ),
+      );
+  }
+
+  /**
    * Reads the vessel's connectivity state published by
    * signalk-internet (`network.internet.state`). Returns null when the
    * path is absent so vessels without a connectivity plugin are never
@@ -713,5 +783,7 @@ module.exports.DEFAULT_APPROACH_RADIUS_NM = DEFAULT_APPROACH_RADIUS_NM;
 module.exports.MAX_QUEUE_SIZE = MAX_QUEUE_SIZE;
 module.exports.RECOVERY_TRIGGER_NM = RECOVERY_TRIGGER_NM;
 module.exports.RECOVERY_BANDS = RECOVERY_BANDS;
+module.exports.CHARTS_PROVIDER_ID = CHARTS_PROVIDER_ID;
+module.exports.CHARTS_REFRESH_GLOBAL = CHARTS_REFRESH_GLOBAL;
 module.exports.expandHome = expandHome;
 module.exports.resolveConfig = resolveConfig;

@@ -247,6 +247,66 @@ describe("plugin", () => {
     assert.notEqual(meta.bounds, "0,0,0,0");
   });
 
+  test("notifies the charts provider after tiles land", async () => {
+    const notifyCalls = [];
+    startWithTestHooks({ notify: () => notifyCalls.push(1) });
+    plugin.registerWithRouter(app.router);
+
+    const res = makeRes();
+    route(
+      app,
+      "post",
+      "/fetch-target",
+    )(
+      {
+        body: {
+          coordinates: [
+            { lat: 0, lon: 0 },
+            { lat: 0, lon: 0.5 },
+          ],
+        },
+      },
+      res,
+    );
+    assert.equal(res.statusCode, 200);
+    assert.ok(res.body.totalTiles > 0);
+
+    await waitUntil(() => notifyCalls.length > 0);
+    // Cancelled or empty jobs must not trigger a refresh storm
+    assert.equal(notifyCalls.length, 1);
+  });
+
+  test("cancelled jobs with no tiles do not notify the provider", async () => {
+    let resolveFetch;
+    const slowFetch = () =>
+      new Promise((resolve) => {
+        resolveFetch = resolve;
+      }).then(() => ({
+        ok: true,
+        status: 200,
+        headers: undefined,
+        arrayBuffer: async () => PNG,
+      }));
+    const notifyCalls = [];
+    startWithTestHooks({ fetch: slowFetch, notify: () => notifyCalls.push(1) });
+    plugin.registerWithRouter(app.router);
+
+    route(
+      app,
+      "post",
+      "/fetch-target",
+    )({ body: { coordinates: [{ lat: 0, lon: 0 }] } }, makeRes());
+    await waitUntil(() => resolveFetch !== undefined);
+    route(app, "post", "/cancel")({}, makeRes());
+    resolveFetch();
+    await waitUntil(() => {
+      const s = makeRes();
+      route(app, "get", "/status")({}, s);
+      return !s.body.isDownloading;
+    });
+    assert.equal(notifyCalls.length, 0);
+  });
+
   test("fetch-target starts a job that downloads tiles into the store", async () => {
     startWithTestHooks();
     plugin.registerWithRouter(app.router);

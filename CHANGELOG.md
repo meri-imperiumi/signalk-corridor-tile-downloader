@@ -70,3 +70,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (including concurrent-reader WAL check), downloader behavior
   (throttle, backoff, rate-limit escalation, circuit breaker,
   cancellation), plugin REST handlers, and webapp pure modules.
+
+### Changed
+
+- After any job lands tiles, the plugin now asks
+  signalk-charts-provider-simple to rescan its charts directory — via
+  the in-process `__signalk_chartsProviderRefresh` hook when the
+  provider publishes it, falling back to the provider's
+  `POST /plugins/signalk-charts-provider-simple/refresh` endpoint — so
+  the corridor appears in Freeboard without a provider restart. Quiet
+  no-op when the provider (or its refresh capability) is absent.
