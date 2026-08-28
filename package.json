@@ -3,6 +3,14 @@
   "version": "0.1.0",
   "description": "Pre-cache marine chart tile corridors into MBTiles for offline navigation",
   "main": "index.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/meri-imperiumi/signalk-corridor-tile-downloader.git"
+  },
+  "bugs": {
+    "url": "https://github.com/meri-imperiumi/signalk-corridor-tile-downloader/issues"
+  },
+  "homepage": "https://github.com/meri-imperiumi/signalk-corridor-tile-downloader#readme",
   "scripts": {
     "format": "npx @biomejs/biome check --use-editorconfig=true --write index.js lib/ test/ public/",
     "lint": "npx @biomejs/biome check --use-editorconfig=true index.js lib/ public/",
