@@ -11,10 +11,10 @@ import { panelCss } from "./panel.js";
 const API_BASE = "/plugins/signalk-corridor-tile-downloader";
 
 class CtdRoutePanel extends HTMLElement {
-	constructor() {
-		super();
-		const shadow = this.attachShadow({ mode: "open" });
-		shadow.innerHTML = `
+  constructor() {
+    super();
+    const shadow = this.attachShadow({ mode: "open" });
+    shadow.innerHTML = `
       <style>${panelCss(`
         .desc {
           margin: 0 0 1rem;
@@ -77,86 +77,86 @@ class CtdRoutePanel extends HTMLElement {
         <div class="result" id="result"></div>
       </div>
     `;
-		/** @type {HTMLElement} */
-		this.routeNameEl = shadow.getElementById("route-name");
-		/** @type {HTMLButtonElement} */
-		this.fetchEl = shadow.getElementById("fetch");
-		/** @type {HTMLButtonElement} */
-		this.meteredEl = shadow.getElementById("metered");
-		/** @type {HTMLElement} */
-		this.resultEl = shadow.getElementById("result");
+    /** @type {HTMLElement} */
+    this.routeNameEl = shadow.getElementById("route-name");
+    /** @type {HTMLButtonElement} */
+    this.fetchEl = shadow.getElementById("fetch");
+    /** @type {HTMLButtonElement} */
+    this.meteredEl = shadow.getElementById("metered");
+    /** @type {HTMLElement} */
+    this.resultEl = shadow.getElementById("result");
 
-		this._busy = true;
-		this._metered = false;
+    this._busy = true;
+    this._metered = false;
 
-		this.fetchEl.addEventListener("click", () => this.fetchActiveRoute());
-		this.meteredEl.addEventListener("click", () => {
-			this.metered = !this._metered;
-			this.dispatchEvent(
-				new CustomEvent("ctd:metered", {
-					bubbles: true,
-					composed: true,
-					detail: { checked: this._metered },
-				}),
-			);
-		});
-	}
+    this.fetchEl.addEventListener("click", () => this.fetchActiveRoute());
+    this.meteredEl.addEventListener("click", () => {
+      this.metered = !this._metered;
+      this.dispatchEvent(
+        new CustomEvent("ctd:metered", {
+          bubbles: true,
+          composed: true,
+          detail: { checked: this._metered },
+        }),
+      );
+    });
+  }
 
-	/** @param {boolean} value */
-	set metered(value) {
-		this._metered = value === true;
-		this.meteredEl.textContent = this._metered ? "[ ON ]" : "[ OFF ]";
-		this.meteredEl.setAttribute("aria-pressed", String(this._metered));
-	}
+  /** @param {boolean} value */
+  set metered(value) {
+    this._metered = value === true;
+    this.meteredEl.textContent = this._metered ? "[ ON ]" : "[ OFF ]";
+    this.meteredEl.setAttribute("aria-pressed", String(this._metered));
+  }
 
-	get metered() {
-		return this._metered;
-	}
+  get metered() {
+    return this._metered;
+  }
 
-	/** @param {object} status */
-	update(status) {
-		if (!status) return;
-		this._busy = status.isDownloading === true;
-		this.fetchEl.disabled = this._busy;
-		if (status.activeRouteName) {
-			this.routeNameEl.textContent = status.activeRouteName;
-		}
-	}
+  /** @param {object} status */
+  update(status) {
+    if (!status) return;
+    this._busy = status.isDownloading === true;
+    this.fetchEl.disabled = this._busy;
+    if (status.activeRouteName) {
+      this.routeNameEl.textContent = status.activeRouteName;
+    }
+  }
 
-	async fetchActiveRoute() {
-		if (this._busy) return;
-		this.fetchEl.disabled = true;
-		this.showResult("Contacting server…");
-		try {
-			const res = await fetch(`${API_BASE}/fetch-active-route`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ forceOnMetered: this._metered }),
-			});
-			const body = await res.json().catch(() => ({}));
-			if (!res.ok) {
-				this.showResult(`${body.message || `HTTP ${res.status}`}`, true);
-			} else {
-				this.showResult(`Job started: ${body.totalTiles} tiles queued`);
-				this.dispatchEvent(
-					new CustomEvent("ctd:refresh", { bubbles: true, composed: true }),
-				);
-			}
-		} catch (e) {
-			this.showResult(`Fetch failed: ${e.message}`, true);
-		} finally {
-			this.update({ isDownloading: this._busy });
-		}
-	}
+  async fetchActiveRoute() {
+    if (this._busy) return;
+    this.fetchEl.disabled = true;
+    this.showResult("Contacting server…");
+    try {
+      const res = await fetch(`${API_BASE}/fetch-active-route`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ forceOnMetered: this._metered }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        this.showResult(`${body.message || `HTTP ${res.status}`}`, true);
+      } else {
+        this.showResult(`Job started: ${body.totalTiles} tiles queued`);
+        this.dispatchEvent(
+          new CustomEvent("ctd:refresh", { bubbles: true, composed: true }),
+        );
+      }
+    } catch (e) {
+      this.showResult(`Fetch failed: ${e.message}`, true);
+    } finally {
+      this.update({ isDownloading: this._busy });
+    }
+  }
 
-	/**
-	 * @param {string} text
-	 * @param {boolean} isError
-	 */
-	showResult(text, isError = false) {
-		this.resultEl.textContent = text;
-		this.resultEl.className = isError ? "result error" : "result";
-	}
+  /**
+   * @param {string} text
+   * @param {boolean} isError
+   */
+  showResult(text, isError = false) {
+    this.resultEl.textContent = text;
+    this.resultEl.className = isError ? "result error" : "result";
+  }
 }
 
 customElements.define("ctd-route-panel", CtdRoutePanel);

@@ -12,10 +12,10 @@ import { formatSI } from "../format.js";
 import { panelCss } from "./panel.js";
 
 class CtdStatusHeader extends HTMLElement {
-	constructor() {
-		super();
-		const shadow = this.attachShadow({ mode: "open" });
-		shadow.innerHTML = `
+  constructor() {
+    super();
+    const shadow = this.attachShadow({ mode: "open" });
+    shadow.innerHTML = `
       <style>${panelCss(`
         .grid {
           display: grid;
@@ -51,62 +51,62 @@ class CtdStatusHeader extends HTMLElement {
         </div>
       </div>
     `;
-		/** @type {HTMLElement} */
-		this.cardEl = shadow.getElementById("card");
-		/** @type {HTMLElement} */
-		this.backendEl = shadow.getElementById("backend");
-		/** @type {HTMLElement} */
-		this.jobEl = shadow.getElementById("job");
-		/** @type {HTMLElement} */
-		this.routeEl = shadow.getElementById("route");
-		/** @type {HTMLElement} */
-		this.cacheEl = shadow.getElementById("cache");
-	}
+    /** @type {HTMLElement} */
+    this.cardEl = shadow.getElementById("card");
+    /** @type {HTMLElement} */
+    this.backendEl = shadow.getElementById("backend");
+    /** @type {HTMLElement} */
+    this.jobEl = shadow.getElementById("job");
+    /** @type {HTMLElement} */
+    this.routeEl = shadow.getElementById("route");
+    /** @type {HTMLElement} */
+    this.cacheEl = shadow.getElementById("cache");
+  }
 
-	/**
-	 * @param {object|null} status - /status payload (null when the poll
-	 *   failed and only the backend badge should change)
-	 * @param {boolean} online - Backend reachable
-	 */
-	update(status, online) {
-		this.backendEl.textContent = online ? "ONLINE" : "OFFLINE";
-		if (status) {
-			this.jobEl.textContent = jobLabel(status);
-			this.routeEl.textContent = status.activeRouteName || "—";
-			this.cacheEl.textContent = formatSI(status.dbSizeBytes, "B");
-			this.cardEl.className = `sk-card ${themeFor(status, online)}`;
-		} else if (!online) {
-			this.jobEl.textContent = "—";
-			this.cardEl.className = "sk-card theme-red";
-		}
-	}
+  /**
+   * @param {object|null} status - /status payload (null when the poll
+   *   failed and only the backend badge should change)
+   * @param {boolean} online - Backend reachable
+   */
+  update(status, online) {
+    this.backendEl.textContent = online ? "ONLINE" : "OFFLINE";
+    if (status) {
+      this.jobEl.textContent = jobLabel(status);
+      this.routeEl.textContent = status.activeRouteName || "—";
+      this.cacheEl.textContent = formatSI(status.dbSizeBytes, "B");
+      this.cardEl.className = `sk-card ${themeFor(status, online)}`;
+    } else if (!online) {
+      this.jobEl.textContent = "—";
+      this.cardEl.className = "sk-card theme-red";
+    }
+  }
 }
 
 /** Maps job state to the header badge text. */
 function jobLabel(status) {
-	if (status.isDownloading) {
-		return status.suspended
-			? `SUSPENDED (${status.suspendReason || "?"})`
-			: "DOWNLOADING";
-	}
-	switch (status.state) {
-		case "completed":
-			return status.failed > 0 ? `DONE (${status.failed} FAILED)` : "COMPLETE";
-		case "cancelled":
-			return "CANCELLED";
-		default:
-			return "IDLE";
-	}
+  if (status.isDownloading) {
+    return status.suspended
+      ? `SUSPENDED (${status.suspendReason || "?"})`
+      : "DOWNLOADING";
+  }
+  switch (status.state) {
+    case "completed":
+      return status.failed > 0 ? `DONE (${status.failed} FAILED)` : "COMPLETE";
+    case "cancelled":
+      return "CANCELLED";
+    default:
+      return "IDLE";
+  }
 }
 
 /** Maps job state + backend connectivity to a theme class. */
 function themeFor(status, online) {
-	if (!online) return "theme-red";
-	if (status.suspended) return "theme-orange";
-	if (status.isDownloading) return "theme-orange";
-	if (status.state === "completed") return "theme-green";
-	if (status.state === "cancelled") return "theme-red";
-	return "theme-teal";
+  if (!online) return "theme-red";
+  if (status.suspended) return "theme-orange";
+  if (status.isDownloading) return "theme-orange";
+  if (status.state === "completed") return "theme-green";
+  if (status.state === "cancelled") return "theme-red";
+  return "theme-teal";
 }
 
 customElements.define("ctd-status-header", CtdStatusHeader);

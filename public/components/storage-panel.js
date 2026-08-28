@@ -12,10 +12,10 @@ import { panelCss } from "./panel.js";
 const API_BASE = "/plugins/signalk-corridor-tile-downloader";
 
 class CtdStoragePanel extends HTMLElement {
-	constructor() {
-		super();
-		const shadow = this.attachShadow({ mode: "open" });
-		shadow.innerHTML = `
+  constructor() {
+    super();
+    const shadow = this.attachShadow({ mode: "open" });
+    shadow.innerHTML = `
       <style>${panelCss(`
         .row {
           display: flex;
@@ -57,66 +57,66 @@ class CtdStoragePanel extends HTMLElement {
         <div class="result" id="result"></div>
       </div>
     `;
-		/** @type {HTMLElement} */
-		this.sizeEl = shadow.getElementById("size");
-		/** @type {HTMLElement} */
-		this.pathEl = shadow.getElementById("path");
-		/** @type {HTMLButtonElement} */
-		this.vacuumEl = shadow.getElementById("vacuum");
-		/** @type {HTMLElement} */
-		this.resultEl = shadow.getElementById("result");
+    /** @type {HTMLElement} */
+    this.sizeEl = shadow.getElementById("size");
+    /** @type {HTMLElement} */
+    this.pathEl = shadow.getElementById("path");
+    /** @type {HTMLButtonElement} */
+    this.vacuumEl = shadow.getElementById("vacuum");
+    /** @type {HTMLElement} */
+    this.resultEl = shadow.getElementById("result");
 
-		this._busy = false;
-		this.vacuumEl.addEventListener("click", () => this.vacuum());
-	}
+    this._busy = false;
+    this.vacuumEl.addEventListener("click", () => this.vacuum());
+  }
 
-	/** @param {object} status */
-	update(status) {
-		if (!status) return;
-		this._busy = status.isDownloading === true;
-		this.vacuumEl.disabled = this._busy;
-		this.sizeEl.textContent = formatSI(status.dbSizeBytes, "B");
-		this.pathEl.textContent = status.outputPath || "";
-	}
+  /** @param {object} status */
+  update(status) {
+    if (!status) return;
+    this._busy = status.isDownloading === true;
+    this.vacuumEl.disabled = this._busy;
+    this.sizeEl.textContent = formatSI(status.dbSizeBytes, "B");
+    this.pathEl.textContent = status.outputPath || "";
+  }
 
-	async vacuum() {
-		if (this._busy) return;
-		// Guarded trigger (spec §8B)
-		if (
-			!window.confirm(
-				"VACUUM the tile cache now? Rebuilding the database file may take a moment.",
-			)
-		) {
-			return;
-		}
-		this.vacuumEl.disabled = true;
-		this.showResult("Vacuuming…");
-		try {
-			const res = await fetch(`${API_BASE}/vacuum`, { method: "POST" });
-			const body = await res.json().catch(() => ({}));
-			if (!res.ok) {
-				this.showResult(body.message || `HTTP ${res.status}`, true);
-			} else {
-				this.showResult("Vacuum complete");
-				this.dispatchEvent(
-					new CustomEvent("ctd:refresh", { bubbles: true, composed: true }),
-				);
-			}
-		} catch (e) {
-			this.showResult(`Vacuum failed: ${e.message}`, true);
-		} finally {
-			this.vacuumEl.disabled = this._busy;
-		}
-	}
+  async vacuum() {
+    if (this._busy) return;
+    // Guarded trigger (spec §8B)
+    if (
+      !window.confirm(
+        "VACUUM the tile cache now? Rebuilding the database file may take a moment.",
+      )
+    ) {
+      return;
+    }
+    this.vacuumEl.disabled = true;
+    this.showResult("Vacuuming…");
+    try {
+      const res = await fetch(`${API_BASE}/vacuum`, { method: "POST" });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        this.showResult(body.message || `HTTP ${res.status}`, true);
+      } else {
+        this.showResult("Vacuum complete");
+        this.dispatchEvent(
+          new CustomEvent("ctd:refresh", { bubbles: true, composed: true }),
+        );
+      }
+    } catch (e) {
+      this.showResult(`Vacuum failed: ${e.message}`, true);
+    } finally {
+      this.vacuumEl.disabled = this._busy;
+    }
+  }
 
-	/**
-	 * @param {string} text
-	 * @param {boolean} isError
-	 */
-	showResult(text, isError = false) {
-		this.resultEl.textContent = text;
-		this.resultEl.className = isError ? "result error" : "result";
-	}
+  /**
+   * @param {string} text
+   * @param {boolean} isError
+   */
+  showResult(text, isError = false) {
+    this.resultEl.textContent = text;
+    this.resultEl.className = isError ? "result error" : "result";
+  }
 }
 
 customElements.define("ctd-storage-panel", CtdStoragePanel);

@@ -23,29 +23,29 @@ const POINT_TAGS = ["trkpt", "rtept", "wpt"];
  * @returns {{coordinates: Array<{lat: number, lon: number}>, source: string|null}}
  */
 function coordinatesFromDocument(doc) {
-	for (const tag of POINT_TAGS) {
-		const points = doc.getElementsByTagName(tag);
-		if (!points || points.length === 0) continue;
-		const coordinates = [];
-		for (const p of points) {
-			const lat = Number(p.getAttribute("lat"));
-			const lon = Number(p.getAttribute("lon"));
-			if (
-				Number.isFinite(lat) &&
-				Number.isFinite(lon) &&
-				lat >= -90 &&
-				lat <= 90 &&
-				lon >= -180 &&
-				lon <= 180
-			) {
-				coordinates.push({ lat, lon });
-			}
-		}
-		if (coordinates.length > 0) {
-			return { coordinates, source: tag };
-		}
-	}
-	return { coordinates: [], source: null };
+  for (const tag of POINT_TAGS) {
+    const points = doc.getElementsByTagName(tag);
+    if (!points || points.length === 0) continue;
+    const coordinates = [];
+    for (const p of points) {
+      const lat = Number(p.getAttribute("lat"));
+      const lon = Number(p.getAttribute("lon"));
+      if (
+        Number.isFinite(lat) &&
+        Number.isFinite(lon) &&
+        lat >= -90 &&
+        lat <= 90 &&
+        lon >= -180 &&
+        lon <= 180
+      ) {
+        coordinates.push({ lat, lon });
+      }
+    }
+    if (coordinates.length > 0) {
+      return { coordinates, source: tag };
+    }
+  }
+  return { coordinates: [], source: null };
 }
 
 /**
@@ -56,18 +56,18 @@ function coordinatesFromDocument(doc) {
  * @throws When the XML is malformed or contains no usable points
  */
 async function parseGpxText(text) {
-	const parser = new DOMParser();
-	const doc = parser.parseFromString(text, "application/xml");
-	if (doc.getElementsByTagName("parsererror").length > 0) {
-		throw new Error("Invalid GPX: XML parse error");
-	}
-	const result = coordinatesFromDocument(doc);
-	if (result.coordinates.length === 0) {
-		throw new Error(
-			"Invalid GPX: no trackpoints, route points or waypoints found",
-		);
-	}
-	return result;
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(text, "application/xml");
+  if (doc.getElementsByTagName("parsererror").length > 0) {
+    throw new Error("Invalid GPX: XML parse error");
+  }
+  const result = coordinatesFromDocument(doc);
+  if (result.coordinates.length === 0) {
+    throw new Error(
+      "Invalid GPX: no trackpoints, route points or waypoints found",
+    );
+  }
+  return result;
 }
 
 export { coordinatesFromDocument, POINT_TAGS, parseGpxText };

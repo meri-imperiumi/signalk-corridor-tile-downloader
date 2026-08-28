@@ -4,8 +4,8 @@
   "description": "Pre-cache marine chart tile corridors into MBTiles for offline navigation",
   "main": "index.js",
   "scripts": {
-    "format": "biome check --write index.js lib/ test/ public/",
-    "lint": "biome check index.js lib/ public/",
+    "format": "npx @biomejs/biome check --use-editorconfig=true --write index.js lib/ test/ public/",
+    "lint": "npx @biomejs/biome check --use-editorconfig=true index.js lib/ public/",
     "test": "node --test \"test/*.test.js\""
   },
   "keywords": [

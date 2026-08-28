@@ -17,19 +17,19 @@
  * @returns {string} Formatted string, or `—` for missing values
  */
 function formatSI(value, unit = "") {
-	if (value == null || Number.isNaN(value)) return "—";
-	const steps = [
-		[1e9, "G"],
-		[1e6, "M"],
-		[1e3, "k"],
-	];
-	const abs = Math.abs(value);
-	for (const [factor, prefix] of steps) {
-		if (abs >= factor) {
-			return `${trim(value / factor)} ${prefix}${unit}`;
-		}
-	}
-	return `${trim(value)} ${unit}`.trim();
+  if (value == null || Number.isNaN(value)) return "—";
+  const steps = [
+    [1e9, "G"],
+    [1e6, "M"],
+    [1e3, "k"],
+  ];
+  const abs = Math.abs(value);
+  for (const [factor, prefix] of steps) {
+    if (abs >= factor) {
+      return `${trim(value / factor)} ${prefix}${unit}`;
+    }
+  }
+  return `${trim(value)} ${unit}`.trim();
 }
 
 /**
@@ -39,7 +39,7 @@ function formatSI(value, unit = "") {
  * @returns {string}
  */
 function trim(n) {
-	return String(Number(n.toFixed(1)));
+  return String(Number(n.toFixed(1)));
 }
 
 /**
@@ -49,15 +49,15 @@ function trim(n) {
  * @returns {string} `—` when unknown
  */
 function formatEta(ms) {
-	if (ms == null || Number.isNaN(ms) || ms < 0) return "—";
-	const totalSeconds = Math.round(ms / 1000);
-	if (totalSeconds < 60) return `${totalSeconds}s`;
-	const totalMinutes = Math.floor(totalSeconds / 60);
-	if (totalMinutes < 60) {
-		return `${totalMinutes}m ${String(totalSeconds % 60).padStart(2, "0")}s`;
-	}
-	const hours = Math.floor(totalMinutes / 60);
-	return `${hours}h ${String(totalMinutes % 60).padStart(2, "0")}m`;
+  if (ms == null || Number.isNaN(ms) || ms < 0) return "—";
+  const totalSeconds = Math.round(ms / 1000);
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  if (totalMinutes < 60) {
+    return `${totalMinutes}m ${String(totalSeconds % 60).padStart(2, "0")}s`;
+  }
+  const hours = Math.floor(totalMinutes / 60);
+  return `${hours}h ${String(totalMinutes % 60).padStart(2, "0")}m`;
 }
 
 /**
@@ -68,11 +68,11 @@ function formatEta(ms) {
  * @returns {string}
  */
 function formatLocalTime(ts) {
-	const d = ts instanceof Date ? ts : new Date(ts);
-	const p = (n) => String(n).padStart(2, "0");
-	return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(
-		d.getHours(),
-	)}:${p(d.getMinutes())}`;
+  const d = ts instanceof Date ? ts : new Date(ts);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(
+    d.getHours(),
+  )}:${p(d.getMinutes())}`;
 }
 
 export { formatEta, formatLocalTime, formatSI };

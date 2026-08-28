@@ -9,100 +9,100 @@
  */
 
 :root {
-	/* Base Canvas (constant) */
-	--bg-base: #080a0c;
-	--bg-panel: #111414;
-	--bg-panel-muted: #0a0c0c;
+  /* Base Canvas (constant) */
+  --bg-base: #080a0c;
+  --bg-panel: #111414;
+  --bg-panel-muted: #0a0c0c;
 }
 
 /* Day Mode (High Visibility/Saturation) */
 :root[data-mode="day"] {
-	--color-green: #8dfcbb;
-	--color-green-rgb: 141, 252, 187;
-	--color-teal: #66c6db;
-	--color-teal-rgb: 102, 198, 219;
-	--color-orange: #fca847;
-	--color-orange-rgb: 252, 168, 71;
-	--color-red: #ff5e5e;
-	--color-red-rgb: 255, 94, 94;
-	--color-grey: #666666;
-	--color-grey-rgb: 102, 102, 102;
+  --color-green: #8dfcbb;
+  --color-green-rgb: 141, 252, 187;
+  --color-teal: #66c6db;
+  --color-teal-rgb: 102, 198, 219;
+  --color-orange: #fca847;
+  --color-orange-rgb: 252, 168, 71;
+  --color-red: #ff5e5e;
+  --color-red-rgb: 255, 94, 94;
+  --color-grey: #666666;
+  --color-grey-rgb: 102, 102, 102;
 
-	--text-main: #ffffff;
-	--text-muted: #a0a0b5;
+  --text-main: #ffffff;
+  --text-muted: #a0a0b5;
 }
 
 /* Night Mode (Tactical/Dimmed) */
 :root[data-mode="night"] {
-	--color-green: #4a7555;
-	--color-green-rgb: 74, 117, 85;
-	--color-teal: #33616b;
-	--color-teal-rgb: 51, 97, 107;
-	--color-orange: #8a5318;
-	--color-orange-rgb: 138, 83, 24;
-	--color-red: #8f3333;
-	--color-red-rgb: 143, 51, 51;
-	--color-grey: #333333;
-	--color-grey-rgb: 51, 51, 51;
+  --color-green: #4a7555;
+  --color-green-rgb: 74, 117, 85;
+  --color-teal: #33616b;
+  --color-teal-rgb: 51, 97, 107;
+  --color-orange: #8a5318;
+  --color-orange-rgb: 138, 83, 24;
+  --color-red: #8f3333;
+  --color-red-rgb: 143, 51, 51;
+  --color-grey: #333333;
+  --color-grey-rgb: 51, 51, 51;
 
-	--text-main: #c4c4c4;
-	--text-muted: #666677;
+  --text-main: #c4c4c4;
+  --text-muted: #666677;
 }
 
 * {
-	box-sizing: border-box;
+  box-sizing: border-box;
 }
 
 html,
 body {
-	height: 100%;
+  height: 100%;
 }
 
 body {
-	margin: 0;
-	font-family: system-ui, -apple-system, sans-serif;
-	background: var(--bg-base);
-	color: var(--text-main);
-	-webkit-font-smoothing: antialiased;
+  margin: 0;
+  font-family: system-ui, -apple-system, sans-serif;
+  background: var(--bg-base);
+  color: var(--text-main);
+  -webkit-font-smoothing: antialiased;
 }
 
 main {
-	width: min(100% - 2rem, 1100px);
-	margin-inline: auto;
-	padding-block: clamp(1rem, 2.5vw, 2rem);
+  width: min(100% - 2rem, 1100px);
+  margin-inline: auto;
+  padding-block: clamp(1rem, 2.5vw, 2rem);
 }
 
 h1 {
-	font-size: clamp(1.1rem, 1rem + 1vw, 1.6rem);
-	font-weight: 700;
-	text-transform: uppercase;
-	letter-spacing: 0.1em;
-	color: var(--color-teal);
-	margin: 0 0 1.25rem;
+  font-size: clamp(1.1rem, 1rem + 1vw, 1.6rem);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--color-teal);
+  margin: 0 0 1.25rem;
 }
 
 ctd-app {
-	display: block;
+  display: block;
 }
 
 /* Backend-offline indicator (spec §2: visually indicate a lost
    connection). Applied by app.js via the data-stream attribute when
    the /status poll fails. */
 html[data-stream="offline"] body::before {
-	content: "BACKEND OFFLINE — RETRYING";
-	position: fixed;
-	top: 0;
-	left: 0;
-	right: 0;
-	z-index: 100;
-	background: var(--color-red);
-	color: var(--bg-base);
-	font:
-		700 0.7rem / 2 ui-monospace,
-		"Fira Code",
-		monospace;
-	letter-spacing: 0.2em;
-	text-align: center;
-	text-transform: uppercase;
-	pointer-events: none;
+  content: "BACKEND OFFLINE — RETRYING";
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 100;
+  background: var(--color-red);
+  color: var(--bg-base);
+  font:
+    700 0.7rem / 2 ui-monospace,
+    "Fira Code",
+    monospace;
+  letter-spacing: 0.2em;
+  text-align: center;
+  text-transform: uppercase;
+  pointer-events: none;
 }

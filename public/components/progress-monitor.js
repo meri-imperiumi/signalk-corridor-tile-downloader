@@ -13,10 +13,10 @@ import { panelCss } from "./panel.js";
 const API_BASE = "/plugins/signalk-corridor-tile-downloader";
 
 class CorridorProgress extends HTMLElement {
-	constructor() {
-		super();
-		const shadow = this.attachShadow({ mode: "open" });
-		shadow.innerHTML = `
+  constructor() {
+    super();
+    const shadow = this.attachShadow({ mode: "open" });
+    shadow.innerHTML = `
       <style>${panelCss(`
         .top {
           display: flex;
@@ -116,107 +116,107 @@ class CorridorProgress extends HTMLElement {
         </div>
       </div>
     `;
-		/** @type {HTMLElement} */
-		this.cardEl = shadow.getElementById("card");
-		/** @type {HTMLElement} */
-		this.pctEl = shadow.getElementById("pct");
-		/** @type {HTMLElement} */
-		this.badgeEl = shadow.getElementById("badge");
-		/** @type {HTMLProgressElement} */
-		this.barEl = shadow.getElementById("bar");
-		/** @type {HTMLElement} */
-		this.countsEl = shadow.getElementById("counts");
-		/** @type {HTMLElement} */
-		this.failedEl = shadow.getElementById("failed");
-		/** @type {HTMLElement} */
-		this.cachedEl = shadow.getElementById("cached");
-		/** @type {HTMLElement} */
-		this.rateEl = shadow.getElementById("rate");
-		/** @type {HTMLElement} */
-		this.etaEl = shadow.getElementById("eta");
-		/** @type {HTMLElement} */
-		this.noticeEl = shadow.getElementById("notice");
-		/** @type {HTMLElement} */
-		this.actionsEl = shadow.getElementById("actions");
-		/** @type {HTMLButtonElement} */
-		this.cancelEl = shadow.getElementById("cancel");
+    /** @type {HTMLElement} */
+    this.cardEl = shadow.getElementById("card");
+    /** @type {HTMLElement} */
+    this.pctEl = shadow.getElementById("pct");
+    /** @type {HTMLElement} */
+    this.badgeEl = shadow.getElementById("badge");
+    /** @type {HTMLProgressElement} */
+    this.barEl = shadow.getElementById("bar");
+    /** @type {HTMLElement} */
+    this.countsEl = shadow.getElementById("counts");
+    /** @type {HTMLElement} */
+    this.failedEl = shadow.getElementById("failed");
+    /** @type {HTMLElement} */
+    this.cachedEl = shadow.getElementById("cached");
+    /** @type {HTMLElement} */
+    this.rateEl = shadow.getElementById("rate");
+    /** @type {HTMLElement} */
+    this.etaEl = shadow.getElementById("eta");
+    /** @type {HTMLElement} */
+    this.noticeEl = shadow.getElementById("notice");
+    /** @type {HTMLElement} */
+    this.actionsEl = shadow.getElementById("actions");
+    /** @type {HTMLButtonElement} */
+    this.cancelEl = shadow.getElementById("cancel");
 
-		this.cancelEl.addEventListener("click", () => this.cancelJob());
-	}
+    this.cancelEl.addEventListener("click", () => this.cancelJob());
+  }
 
-	/** @param {object} status */
-	update(status) {
-		if (!status) return;
-		const total = status.totalQueued || 0;
-		const done =
-			(status.completed || 0) + (status.skipped || 0) + (status.failed || 0);
-		const pct =
-			total > 0 ? (done / total) * 100 : status.state === "completed" ? 100 : 0;
+  /** @param {object} status */
+  update(status) {
+    if (!status) return;
+    const total = status.totalQueued || 0;
+    const done =
+      (status.completed || 0) + (status.skipped || 0) + (status.failed || 0);
+    const pct =
+      total > 0 ? (done / total) * 100 : status.state === "completed" ? 100 : 0;
 
-		this.pctEl.textContent =
-			total > 0 ? `${pct.toFixed(1)}%` : status.state === "idle" ? "—" : "0.0%";
-		this.barEl.value = pct;
+    this.pctEl.textContent =
+      total > 0 ? `${pct.toFixed(1)}%` : status.state === "idle" ? "—" : "0.0%";
+    this.barEl.value = pct;
 
-		this.badgeEl.textContent = badgeFor(status);
-		this.countsEl.textContent = `${done} / ${total} tiles`;
-		this.failedEl.textContent = `${status.failed || 0} failed`;
-		this.cachedEl.textContent = `${status.skipped || 0} cached`;
-		this.rateEl.textContent =
-			status.rate > 0 ? `${(status.rate * 60).toFixed(1)} tiles/min` : "";
-		this.etaEl.textContent = status.isDownloading
-			? `ETA ${formatEta(status.etaMs)}`
-			: "";
+    this.badgeEl.textContent = badgeFor(status);
+    this.countsEl.textContent = `${done} / ${total} tiles`;
+    this.failedEl.textContent = `${status.failed || 0} failed`;
+    this.cachedEl.textContent = `${status.skipped || 0} cached`;
+    this.rateEl.textContent =
+      status.rate > 0 ? `${(status.rate * 60).toFixed(1)} tiles/min` : "";
+    this.etaEl.textContent = status.isDownloading
+      ? `ETA ${formatEta(status.etaMs)}`
+      : "";
 
-		// Circuit breaker / rate-limit notices (Addendums 2-3)
-		let notice = "";
-		if (status.suspended) {
-			notice = `Suspended — ${status.suspendReason || "no"} link · resuming automatically`;
-		} else if (status.isDownloading && status.throttleMs > 5000) {
-			notice = `Server throttle: ${Math.round(status.throttleMs / 1000)}s between requests`;
-		}
-		this.noticeEl.textContent = notice;
-		this.noticeEl.classList.toggle("hidden", notice === "");
+    // Circuit breaker / rate-limit notices (Addendums 2-3)
+    let notice = "";
+    if (status.suspended) {
+      notice = `Suspended — ${status.suspendReason || "no"} link · resuming automatically`;
+    } else if (status.isDownloading && status.throttleMs > 5000) {
+      notice = `Server throttle: ${Math.round(status.throttleMs / 1000)}s between requests`;
+    }
+    this.noticeEl.textContent = notice;
+    this.noticeEl.classList.toggle("hidden", notice === "");
 
-		this.actionsEl.classList.toggle("hidden", !status.isDownloading);
-		this.cardEl.className = `sk-card ${themeFor(status)}`;
-	}
+    this.actionsEl.classList.toggle("hidden", !status.isDownloading);
+    this.cardEl.className = `sk-card ${themeFor(status)}`;
+  }
 
-	async cancelJob() {
-		this.cancelEl.disabled = true;
-		try {
-			await fetch(`${API_BASE}/cancel`, { method: "POST" });
-			this.dispatchEvent(
-				new CustomEvent("ctd:refresh", { bubbles: true, composed: true }),
-			);
-		} catch {
-			// The next poll reflects reality either way
-		} finally {
-			this.cancelEl.disabled = false;
-		}
-	}
+  async cancelJob() {
+    this.cancelEl.disabled = true;
+    try {
+      await fetch(`${API_BASE}/cancel`, { method: "POST" });
+      this.dispatchEvent(
+        new CustomEvent("ctd:refresh", { bubbles: true, composed: true }),
+      );
+    } catch {
+      // The next poll reflects reality either way
+    } finally {
+      this.cancelEl.disabled = false;
+    }
+  }
 }
 
 /** Maps status to the state badge text. */
 function badgeFor(status) {
-	if (status.isDownloading) {
-		return status.suspended ? "SUSPENDED" : "DOWNLOADING";
-	}
-	switch (status.state) {
-		case "completed":
-			return status.failed > 0 ? "COMPLETE · ERRORS" : "COMPLETE";
-		case "cancelled":
-			return "CANCELLED";
-		default:
-			return "IDLE";
-	}
+  if (status.isDownloading) {
+    return status.suspended ? "SUSPENDED" : "DOWNLOADING";
+  }
+  switch (status.state) {
+    case "completed":
+      return status.failed > 0 ? "COMPLETE · ERRORS" : "COMPLETE";
+    case "cancelled":
+      return "CANCELLED";
+    default:
+      return "IDLE";
+  }
 }
 
 /** Maps status to a theme class. */
 function themeFor(status) {
-	if (status.isDownloading) return "theme-orange";
-	if (status.state === "completed") return "theme-green";
-	if (status.state === "cancelled") return "theme-red";
-	return "theme-offline";
+  if (status.isDownloading) return "theme-orange";
+  if (status.state === "completed") return "theme-green";
+  if (status.state === "cancelled") return "theme-red";
+  return "theme-offline";
 }
 
 customElements.define("corridor-progress", CorridorProgress);
