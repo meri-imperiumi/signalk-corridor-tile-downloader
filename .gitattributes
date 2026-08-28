@@ -1,0 +1,20 @@
+# Normalize all text files to LF on checkout and commit, regardless of the
+# platform Git is running on (Windows defaults to CRLF via core.autocrlf).
+# The .editorconfig and Biome (--use-editorconfig=true) both expect LF, and
+# several tests match source content against \n, so a CRLF checkout breaks
+# them on Windows runners. Marking these as text eol=lf keeps every
+# platform's working tree byte-identical.
+
+* text=auto eol=lf
+
+# Explicitly binary assets — never normalize, never diff as text.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
