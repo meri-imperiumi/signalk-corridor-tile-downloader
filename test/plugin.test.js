@@ -215,6 +215,38 @@ describe("plugin", () => {
     assert.equal(res.body.activeRouteName, null);
   });
 
+  test("cache file is created lazily with real bounds on first fetch", () => {
+    startWithTestHooks();
+    plugin.registerWithRouter(app.router);
+
+    // Idle: no cache file, no WAL sidecars — nothing for
+    // charts-provider-simple housekeeping to trip over
+    assert.ok(!fs.existsSync(dbPath));
+    assert.ok(!fs.existsSync(`${dbPath}-wal`));
+    const idle = makeRes();
+    route(app, "get", "/status")({}, idle);
+    assert.equal(idle.body.dbSizeBytes, 0);
+    assert.equal(idle.body.outputPath, dbPath);
+
+    const res = makeRes();
+    route(
+      app,
+      "post",
+      "/fetch-target",
+    )({ body: { coordinates: [{ lat: -18.85, lon: -159.78 }] } }, res);
+    assert.equal(res.statusCode, 200);
+
+    const reader = new DatabaseSync(dbPath);
+    const meta = Object.fromEntries(
+      reader
+        .prepare("SELECT name, value FROM metadata")
+        .all()
+        .map((r) => [r.name, r.value]),
+    );
+    reader.close();
+    assert.notEqual(meta.bounds, "0,0,0,0");
+  });
+
   test("fetch-target starts a job that downloads tiles into the store", async () => {
     startWithTestHooks();
     plugin.registerWithRouter(app.router);

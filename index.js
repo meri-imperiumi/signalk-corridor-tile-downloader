@@ -20,6 +20,7 @@
 /** @typedef {import("@signalk/server-api").Plugin} Plugin */
 
 const os = require("node:os");
+const fs = require("node:fs");
 const path = require("node:path");
 const { bubbleTiles, corridorTiles, distanceNM } = require("./lib/geometry.js");
 const { MbTilesStore, nodeSupportsSqlite } = require("./lib/mbtiles.js");
@@ -163,7 +164,7 @@ module.exports = (app) => {
           type: "string",
           title: "Output path",
           description:
-            "Absolute path of the .mbtiles file. Must live in the directory watched by signalk-charts-provider-simple. A leading ~/ expands to the server user's home.",
+            "Absolute path of the .mbtiles file. Must live in the charts directory watched by signalk-charts-provider-simple (default ~/.signalk/charts-simple). A leading ~/ expands to the server user's home. After the very first fetch, restart the charts provider (or toggle any chart in its UI) once so Freeboard discovers the corridor; later downloads appear immediately.",
           default: DEFAULT_OUTPUT_PATH,
         },
         strategicMarginNM: {
@@ -235,20 +236,15 @@ module.exports = (app) => {
         return;
       }
 
-      try {
-        store = new MbTilesStore(config.outputPath);
-      } catch (err) {
-        store = null;
-        const message = `failed to open ${config.outputPath}: ${err.message}`;
-        setError?.(message);
-        app.error(`${PLUGIN_ID}: ${message}`);
-        return;
-      }
+      // The tile store opens lazily on first use and is released when a
+      // job settles: charts-provider-simple's startup housekeeping deletes
+      // `*.mbtiles-wal` sidecars and bounds-less .mbtiles files, so an
+      // idle downloader must leave neither on disk.
 
       // Test hooks (`fetch`, `sleep`) ride along in the raw options,
       // mirroring the injectable-probe pattern; absent in production.
       downloader = createDownloader({
-        store,
+        getStore: () => store,
         tileServerUrl: config.tileServerUrl,
         userAgent: config.userAgent,
         throttleMs: config.throttleMs,
@@ -336,7 +332,7 @@ module.exports = (app) => {
    * @param {unknown} value - `{latitude, longitude}` position value
    */
   function handlePositionValue(value) {
-    if (!store || !downloader) return;
+    if (!downloader) return;
     if (!value || typeof value !== "object") return;
     const position = {
       lat: Number(value.latitude),
@@ -366,6 +362,46 @@ module.exports = (app) => {
   }
 
   /**
+   * Opens (or reuses) the tile store on demand, honoring configuration
+   * changes to `outputPath`.
+   *
+   * @returns {MbTilesStore}
+   * @throws When the database cannot be opened
+   */
+  function ensureStore() {
+    if (store && store.filePath === config.outputPath) return store;
+    store?.close();
+    store = null;
+    store = new MbTilesStore(config.outputPath);
+    return store;
+  }
+
+  /**
+   * Closes the tile store when no job is using it, so no live
+   * `*.mbtiles-wal` sidecar sits on disk while idle (see start()).
+   */
+  function releaseStoreIfIdle() {
+    if (store && !downloader?.status().isDownloading) {
+      store.close();
+      store = null;
+    }
+  }
+
+  /**
+   * Size of the cache file on disk, without opening a database handle.
+   *
+   * @param {string} filePath
+   * @returns {number}
+   */
+  function fileSizeBytes(filePath) {
+    try {
+      return fs.statSync(filePath).size;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
    * Builds the recovery bubble tiles for a position (5 NM for zooms
    * 8-12, 2 NM for 13-14, clipped to the configured zoom range),
    * checks each against the cache and queues the missing ones into
@@ -374,6 +410,16 @@ module.exports = (app) => {
    * @param {{lat: number, lon: number}} position
    */
   function verifyRecoveryCache(position) {
+    let activeStore;
+    try {
+      activeStore = ensureStore();
+    } catch (err) {
+      app.error(
+        `${PLUGIN_ID}: cannot open tile store for recovery: ${err.message}`,
+      );
+      return;
+    }
+
     const tiles = [];
     const seen = new Set();
     for (const band of RECOVERY_BANDS) {
@@ -390,12 +436,13 @@ module.exports = (app) => {
     }
 
     const missing = tiles.filter(
-      (tile) => !store.hasTile(tile.z, tile.x, tile.yTms),
+      (tile) => !activeStore.hasTile(tile.z, tile.x, tile.yTms),
     );
     if (missing.length === 0) {
       app.debug(
         `${PLUGIN_ID}: position recovery cache complete around ${position.lat.toFixed(4)},${position.lon.toFixed(4)}`,
       );
+      releaseStoreIfIdle();
       return;
     }
 
@@ -434,6 +481,10 @@ module.exports = (app) => {
       setStatus?.("Corridor download cancelled");
     } else {
       setStatus?.("Idle");
+    }
+    // Job settled: release the SQLite handle (and its WAL sidecars).
+    if (!s.isDownloading) {
+      releaseStoreIfIdle();
     }
   }
 
@@ -505,12 +556,17 @@ module.exports = (app) => {
    * @returns {{totalTiles: number}}
    */
   function startJob(coordinates, routeName, forceOnMetered) {
-    if (!store || !downloader) {
-      throw httpError(503, "Tile store unavailable (check plugin log)");
+    if (!downloader) {
+      throw httpError(503, "Downloader not started");
     }
     const running = downloader.status();
     if (running.isDownloading && running.jobType !== "recovery") {
       throw httpError(409, "A download job is already in progress");
+    }
+    try {
+      ensureStore();
+    } catch (err) {
+      throw httpError(500, `Failed to open tile store: ${err.message}`);
     }
 
     const { tiles, bounds } = corridorTiles(coordinates, config);
@@ -577,8 +633,10 @@ module.exports = (app) => {
           ? downloader.status()
           : { isDownloading: false, state: "idle" }),
         activeRouteName: lastRouteName,
-        dbSizeBytes: store ? store.sizeBytes() : 0,
-        outputPath: store ? store.filePath : null,
+        dbSizeBytes: store
+          ? store.sizeBytes()
+          : fileSizeBytes(config ? config.outputPath : ""),
+        outputPath: config ? config.outputPath : null,
       });
     });
 
@@ -626,12 +684,6 @@ module.exports = (app) => {
     });
 
     router.post("/vacuum", (_req, res) => {
-      if (!store) {
-        res
-          .status(503)
-          .json({ message: "Tile store unavailable (check plugin log)" });
-        return;
-      }
       if (downloader?.status().isDownloading) {
         res
           .status(409)
@@ -639,7 +691,8 @@ module.exports = (app) => {
         return;
       }
       try {
-        store.vacuum();
+        ensureStore().vacuum();
+        releaseStoreIfIdle();
         res.json({ status: "vacuum_complete" });
       } catch (err) {
         errorResponse(res, err);

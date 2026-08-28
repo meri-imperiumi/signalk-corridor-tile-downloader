@@ -45,6 +45,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   immediately on `network.internet.state` transitions, and never block
   a user-triggered passage download (they are preempted, carrying
   their pending tiles over as priority work).
+- Verified interop with signalk-charts-provider-simple: TMS row
+  orientation, the loader's `bounds` metadata gate, PNG serving, and
+  stable chart identifier (`passage_cache`) all match its reader, and
+  an interop test suite replays the provider's loader, tile reader and
+  housekeeping logic against files this plugin produces.
+- Hardened the producer/consumer file contract against the provider's
+  startup housekeeping (which deletes bounds-less `.mbtiles` files and
+  unlinks `*.mbtiles-wal` sidecars): the tile store now opens lazily on
+  first fetch and is released when a job settles, an empty cache seeds
+  a placeholder `bounds` row so it always loads as a chart, and
+  `setMetadata` uses DELETE+INSERT (the metadata table has no UNIQUE
+  constraint on `name`, so `INSERT OR REPLACE` was silently appending
+  duplicate rows across restarts).
 - REST API under `/plugins/signalk-corridor-tile-downloader/`:
   `GET /status`, `POST /fetch-active-route`, `POST /fetch-target`,
   `POST /cancel`, `POST /vacuum`.

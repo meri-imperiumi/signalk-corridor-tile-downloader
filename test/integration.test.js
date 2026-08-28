@@ -49,7 +49,7 @@ describe("downloader integration (real fetch + real store)", () => {
   test("downloads over real HTTP into a real MBTiles file", async () => {
     const store = new MbTilesStore(dbPath);
     const downloader = createDownloader({
-      store,
+      getStore: () => store,
       tileServerUrl: `${baseUrl}/seamark/{z}/{x}/{y}.png`,
       userAgent: "IntegrationTest/1.0",
       throttleMs: 1,

@@ -39,6 +39,10 @@ describe("MbTilesStore", () => {
     assert.equal(store.getMetadata("format"), "png");
     assert.equal(store.getMetadata("type"), "overlay");
     assert.equal(store.getMetadata("version"), "1.0.0");
+    // Placeholder bounds keep the empty file loadable for
+    // charts-provider-simple (which drops, and housekeeping-deletes,
+    // bounds-less files); a real corridor overwrites them at fetch start.
+    assert.equal(store.getMetadata("bounds"), "0,0,0,0");
     store.close();
   });
 
@@ -75,6 +79,21 @@ describe("MbTilesStore", () => {
     assert.equal(store.getMetadata("minzoom"), "8");
     assert.equal(store.getMetadata("maxzoom"), "14");
     store.close();
+  });
+
+  test("reopening does not duplicate metadata rows", () => {
+    const first = new MbTilesStore(dbPath);
+    first.setBounds([-170.1, -19.2, -159.1, -18.1]);
+    first.close();
+
+    const second = new MbTilesStore(dbPath);
+    const rows = second.db
+      .prepare("SELECT name, COUNT(*) AS n FROM metadata GROUP BY name")
+      .all();
+    second.close();
+    for (const row of rows) {
+      assert.equal(row.n, 1, `metadata key ${row.name} has ${row.n} rows`);
+    }
   });
 
   test("a second connection can read while the writer is open (WAL)", () => {

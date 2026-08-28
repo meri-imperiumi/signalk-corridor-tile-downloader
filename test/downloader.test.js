@@ -99,7 +99,7 @@ function makeDownloader(store, responses, opts = {}) {
   };
   const sleepFn = yieldingSleep(sleeps);
   const downloader = createDownloader({
-    store,
+    getStore: () => store,
     tileServerUrl: "https://tiles.example/seamark/{z}/{x}/{y}.png",
     userAgent: "TestUA/1.0",
     throttleMs: 0,
@@ -412,7 +412,7 @@ describe("recovery queue (Addendum 5)", () => {
     let netState = "metered";
     const calls = [];
     const dl = createDownloader({
-      store,
+      getStore: () => store,
       tileServerUrl: "https://tiles.example/seamark/{z}/{x}/{y}.png",
       userAgent: "TestUA/1.0",
       throttleMs: 0,
@@ -459,7 +459,7 @@ describe("recovery queue (Addendum 5)", () => {
     let netState = "offline";
     const sleeps = [];
     const dl = createDownloader({
-      store,
+      getStore: () => store,
       tileServerUrl: "https://tiles.example/seamark/{z}/{x}/{y}.png",
       userAgent: "TestUA/1.0",
       throttleMs: 0,
@@ -494,7 +494,7 @@ describe("recovery queue (Addendum 5)", () => {
     const netState = "metered";
     const sleeps = [];
     const dl = createDownloader({
-      store,
+      getStore: () => store,
       tileServerUrl: "https://tiles.example/seamark/{z}/{x}/{y}.png",
       userAgent: "TestUA/1.0",
       throttleMs: 0,
