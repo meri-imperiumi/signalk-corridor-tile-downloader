@@ -1,0 +1,29 @@
+{
+  "name": "signalk-corridor-tile-downloader",
+  "version": "0.1.0",
+  "description": "Pre-cache marine chart tile corridors into MBTiles for offline navigation",
+  "main": "index.js",
+  "scripts": {
+    "format": "biome check --write index.js lib/ test/ public/",
+    "lint": "biome check index.js lib/ public/",
+    "test": "node --test \"test/*.test.js\""
+  },
+  "keywords": [
+    "signalk-node-server-plugin",
+    "signalk-category-charts",
+    "signalk-webapp"
+  ],
+  "author": "Henri Bergius <henri.bergius@iki.fi>",
+  "license": "EUPL-1.2",
+  "signalk-plugin-enabled-by-default": false,
+  "signalk": {
+    "displayName": "Corridor Tile Downloader"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@signalk/server-api": "^2.30.0"
+  }
+}
