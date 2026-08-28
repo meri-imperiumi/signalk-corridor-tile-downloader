@@ -45,6 +45,10 @@ class CtdStatusHeader extends HTMLElement {
             <span class="value" id="route">—</span>
           </div>
           <div class="cell">
+            <span class="label">Source</span>
+            <span class="value" id="source">—</span>
+          </div>
+          <div class="cell">
             <span class="label">Cache</span>
             <span class="value" id="cache">—</span>
           </div>
@@ -60,6 +64,8 @@ class CtdStatusHeader extends HTMLElement {
     /** @type {HTMLElement} */
     this.routeEl = shadow.getElementById("route");
     /** @type {HTMLElement} */
+    this.sourceEl = shadow.getElementById("source");
+    /** @type {HTMLElement} */
     this.cacheEl = shadow.getElementById("cache");
   }
 
@@ -73,6 +79,7 @@ class CtdStatusHeader extends HTMLElement {
     if (status) {
       this.jobEl.textContent = jobLabel(status);
       this.routeEl.textContent = status.activeRouteName || "—";
+      this.sourceEl.textContent = status.tileProvider || "—";
       this.cacheEl.textContent = formatSI(status.dbSizeBytes, "B");
       this.cardEl.className = `sk-card ${themeFor(status, online)}`;
     } else if (!online) {

@@ -76,11 +76,16 @@ function makeRes() {
   };
 }
 
+/** Realistic image/png response headers. */
+const pngHeaders = {
+  get: (name) => (name.toLowerCase() === "content-type" ? "image/png" : null),
+};
+
 function okFetch() {
   return Promise.resolve({
     ok: true,
     status: 200,
-    headers: undefined,
+    headers: pngHeaders,
     arrayBuffer: async () => PNG,
   });
 }
@@ -118,7 +123,7 @@ function countingFetch() {
     return Promise.resolve({
       ok: true,
       status: 200,
-      headers: undefined,
+      headers: pngHeaders,
       arrayBuffer: async () => PNG,
     });
   };
@@ -213,6 +218,7 @@ describe("plugin", () => {
     assert.equal(typeof res.body.dbSizeBytes, "number");
     assert.equal(res.body.outputPath, dbPath);
     assert.equal(res.body.activeRouteName, null);
+    assert.equal(res.body.tileProvider, "Open Waters Seamap");
   });
 
   test("cache file is created lazily with real bounds on first fetch", () => {
@@ -284,7 +290,7 @@ describe("plugin", () => {
       }).then(() => ({
         ok: true,
         status: 200,
-        headers: undefined,
+        headers: pngHeaders,
         arrayBuffer: async () => PNG,
       }));
     const notifyCalls = [];
@@ -429,7 +435,7 @@ describe("plugin", () => {
       }).then(() => ({
         ok: true,
         status: 200,
-        headers: undefined,
+        headers: pngHeaders,
         arrayBuffer: async () => PNG,
       }));
     startWithTestHooks({ fetch: slowFetch });
@@ -487,6 +493,32 @@ describe("plugin", () => {
     route(app, "post", "/vacuum")({}, res);
     assert.equal(res.statusCode, 200);
     assert.equal(res.body.status, "vacuum_complete");
+  });
+
+  test("fetches from the selected provider's URL (Addendum 6)", async () => {
+    const fetch = countingFetch();
+    startWithTestHooks({ fetch: fetch.fn });
+    plugin.registerWithRouter(app.router);
+
+    const res = makeRes();
+    route(
+      app,
+      "post",
+      "/fetch-target",
+    )({ body: { coordinates: [{ lat: 0, lon: 0 }] } }, res);
+    assert.equal(res.statusCode, 200);
+    await waitUntil(() => {
+      const s = makeRes();
+      route(app, "get", "/status")({}, s);
+      return s.body.state === "completed";
+    });
+    assert.ok(fetch.calls.length > 0);
+    assert.ok(
+      fetch.calls.every((url) =>
+        url.startsWith("https://tiles.openwaters.io/seamap/"),
+      ),
+      "default provider is Open Waters Seamap",
+    );
   });
 
   test("stop() closes the store (further fetches are 503)", () => {
@@ -819,12 +851,67 @@ describe("configuration", () => {
     assert.equal(config.minZoom, 8);
     assert.equal(config.maxZoom, 14);
     assert.equal(config.throttleMs, 500);
+    // Addendum 6: Open Waters Seamap is the default provider
+    assert.equal(config.tileProvider, "Open Waters Seamap");
     assert.equal(
       config.tileServerUrl,
-      "https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png",
+      "https://tiles.openwaters.io/seamap/{z}/{x}/{y}.png",
     );
+    assert.equal(config.minTileBytes, 300);
     assert.equal(config.userAgent, "SignalK-Corridor-Downloader/1.0");
     assert.ok(config.outputPath.endsWith("passage_cache.mbtiles"));
+  });
+
+  test("tile provider selection drives the default URL template (Addendum 6)", () => {
+    const providers = pluginFactory.TILE_PROVIDERS;
+    const openSeaMap = pluginFactory.resolveConfig({
+      tileProvider: "OpenSeaMap",
+    });
+    assert.equal(openSeaMap.tileProvider, "OpenSeaMap");
+    assert.equal(openSeaMap.tileServerUrl, providers.OpenSeaMap.urlTemplate);
+    assert.equal(openSeaMap.minTileBytes, 500);
+
+    const openWaters = pluginFactory.resolveConfig({
+      tileProvider: "Open Waters Seamap",
+    });
+    assert.equal(
+      openWaters.tileServerUrl,
+      providers["Open Waters Seamap"].urlTemplate,
+    );
+    assert.equal(openWaters.minTileBytes, 300);
+
+    // Switching the provider rewrites a stored default template
+    const switched = pluginFactory.resolveConfig({
+      tileProvider: "OpenSeaMap",
+      tileServerUrl: providers["Open Waters Seamap"].urlTemplate,
+    });
+    assert.equal(switched.tileServerUrl, providers.OpenSeaMap.urlTemplate);
+
+    // Unknown values fall back to the default provider
+    assert.equal(
+      pluginFactory.resolveConfig({ tileProvider: "Nope" }).tileProvider,
+      pluginFactory.DEFAULT_TILE_PROVIDER,
+    );
+  });
+
+  test("legacy configs without tileProvider keep their OpenSeaMap source", () => {
+    const config = pluginFactory.resolveConfig({
+      tileServerUrl: pluginFactory.TILE_PROVIDERS.OpenSeaMap.urlTemplate,
+    });
+    assert.equal(config.tileProvider, "OpenSeaMap");
+    assert.equal(
+      config.tileServerUrl,
+      pluginFactory.TILE_PROVIDERS.OpenSeaMap.urlTemplate,
+    );
+  });
+
+  test("custom tileServerUrl overrides the provider default", () => {
+    const config = pluginFactory.resolveConfig({
+      tileProvider: "OpenSeaMap",
+      tileServerUrl: "https://tiles.example/{z}/{x}/{y}.png",
+    });
+    assert.equal(config.tileProvider, "OpenSeaMap");
+    assert.equal(config.tileServerUrl, "https://tiles.example/{z}/{x}/{y}.png");
   });
 
   test("expandHome resolves ~ to the home directory", () => {
@@ -840,6 +927,10 @@ describe("configuration", () => {
       tileServerUrl: "https://tiles.example/no-placeholders.png",
     });
     assert.deepEqual([config.minZoom, config.maxZoom], [8, 14]);
-    assert.equal(config.tileServerUrl, pluginFactory.DEFAULT_TILE_URL);
+    assert.equal(
+      config.tileServerUrl,
+      pluginFactory.TILE_PROVIDERS[pluginFactory.DEFAULT_TILE_PROVIDER]
+        .urlTemplate,
+    );
   });
 });

@@ -35,12 +35,29 @@ function fakeStore(precached = []) {
   };
 }
 
+/** Realistic image/png response headers. */
+const pngHeaders = {
+  get: (name) => (name.toLowerCase() === "content-type" ? "image/png" : null),
+};
+
 /** Response factory for the injected fetch. */
 function okResponse(data = PNG) {
   return {
     ok: true,
     status: 200,
-    headers: undefined,
+    headers: pngHeaders,
+    arrayBuffer: async () => data,
+  };
+}
+
+/** 200 OK with a non-png body: provider rate-limit style (Addendum 6). */
+function bodyResponse(contentType, data = Buffer.from("[]")) {
+  return {
+    ok: true,
+    status: 200,
+    headers: {
+      get: (n) => (n.toLowerCase() === "content-type" ? contentType : null),
+    },
     arrayBuffer: async () => data,
   };
 }
@@ -590,5 +607,115 @@ describe("network circuit breaker (Addendum 3)", () => {
     await jobSettled(downloader);
     assert.equal(downloader.status().completed, 1);
     assert.equal(downloader.status().suspended, false);
+  });
+});
+
+describe("payload validation (Addendum 6)", () => {
+  test("drops 200 OK JSON bodies and backs off before retrying", async () => {
+    const store = fakeStore();
+    const { downloader, calls, sleeps } = makeDownloader(store, [
+      bodyResponse("application/json", Buffer.from('{"error":"rate limited"}')),
+      okResponse(),
+    ]);
+    downloader.start([{ z: 8, x: 1, y: 2, yTms: 3 }]);
+    await jobSettled(downloader);
+
+    // The JSON payload was dropped (never inserted), the retry waited
+    // out the first rate-limit penalty, then the real PNG landed
+    assert.equal(calls.length, 2);
+    assert.deepEqual(sleeps, [RATE_LIMIT_PENALTY_BASE_MS]);
+    const s = downloader.status();
+    assert.equal(s.completed, 1);
+    assert.equal(s.failed, 0);
+    assert.equal(store.inserts.length, 1);
+    assert.ok(store.inserts[0].data.equals(PNG));
+  });
+
+  test("drops 200 OK HTML bodies the same way", async () => {
+    const store = fakeStore();
+    const { downloader, calls, sleeps } = makeDownloader(store, [
+      bodyResponse("text/html", Buffer.alloc(600, 0x3c)),
+      bodyResponse("application/json"),
+      okResponse(),
+    ]);
+    downloader.start([{ z: 8, x: 1, y: 2, yTms: 3 }]);
+    await jobSettled(downloader);
+
+    // Both bogus payloads dropped; penalty escalates between them
+    assert.equal(calls.length, 3);
+    assert.deepEqual(sleeps, [
+      RATE_LIMIT_PENALTY_BASE_MS,
+      RATE_LIMIT_PENALTY_BASE_MS * 2,
+    ]);
+    assert.equal(downloader.status().completed, 1);
+    assert.equal(store.inserts.length, 1);
+  });
+
+  test("persistent wrong Content-Type fails the tile after the cap", async () => {
+    const store = fakeStore();
+    const { downloader, calls, sleeps } = makeDownloader(store, [
+      bodyResponse("application/json"),
+    ]);
+    downloader.start([{ z: 8, x: 1, y: 2, yTms: 3 }]);
+    await jobSettled(downloader);
+
+    assert.equal(calls.length, 11);
+    assert.equal(sleeps.length, 10);
+    assert.ok(sleeps.every((ms) => ms >= RATE_LIMIT_PENALTY_BASE_MS));
+    assert.equal(downloader.status().failed, 1);
+    assert.equal(store.inserts.length, 0);
+  });
+
+  test("accepts image/png regardless of case and parameters", async () => {
+    const store = fakeStore();
+    const { downloader, calls, sleeps } = makeDownloader(store, [
+      bodyResponse("Image/PNG; charset=binary", PNG),
+    ]);
+    downloader.start([{ z: 8, x: 1, y: 2, yTms: 3 }]);
+    await jobSettled(downloader);
+
+    assert.equal(calls.length, 1);
+    assert.deepEqual(sleeps, []);
+    assert.equal(downloader.status().completed, 1);
+  });
+
+  test("missing Content-Type header is rejected, not guessed", async () => {
+    const store = fakeStore();
+    const headerless = {
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      arrayBuffer: async () => PNG,
+    };
+    const { downloader, calls } = makeDownloader(store, [
+      headerless,
+      okResponse(),
+    ]);
+    downloader.start([{ z: 8, x: 1, y: 2, yTms: 3 }]);
+    await jobSettled(downloader);
+
+    assert.equal(calls.length, 2);
+    assert.equal(downloader.status().completed, 1);
+  });
+
+  test("minTileBytes is configurable (Open Waters 300-byte rule)", async () => {
+    const sparse = Buffer.alloc(400, 7); // above 300, below 500
+
+    const permissive = fakeStore();
+    const openWaters = makeDownloader(permissive, [okResponse(sparse)], {
+      minTileBytes: 300,
+    });
+    openWaters.downloader.start([{ z: 8, x: 1, y: 2, yTms: 3 }]);
+    await jobSettled(openWaters.downloader);
+    assert.equal(openWaters.downloader.status().completed, 1);
+
+    // Under the default (OpenSeaMap, Addendum 2) baseline it is a
+    // placeholder: counted as a failure, never inserted
+    const strict = fakeStore();
+    const baseline = makeDownloader(strict, [okResponse(sparse)]);
+    baseline.downloader.start([{ z: 8, x: 1, y: 2, yTms: 3 }]);
+    await jobSettled(baseline.downloader);
+    assert.equal(baseline.downloader.status().failed, 1);
+    assert.equal(strict.inserts.length, 0);
   });
 });

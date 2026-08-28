@@ -19,8 +19,16 @@ describe("downloader integration (real fetch + real store)", () => {
   const requests = [];
 
   beforeEach(async () => {
+    requests.length = 0;
     server = http.createServer((req, res) => {
       requests.push({ url: req.url, userAgent: req.headers["user-agent"] });
+      // Addendum 6: some providers answer rate limits with HTTP 200
+      // + application/json instead of a raster body
+      if (req.url.startsWith("/ratelimited/")) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "rate limited" }));
+        return;
+      }
       res.writeHead(200, { "Content-Type": "image/png" });
       res.end(PNG);
     });
@@ -90,6 +98,43 @@ describe("downloader integration (real fetch + real store)", () => {
     const rows = reader.prepare("SELECT COUNT(*) AS n FROM tiles").get();
     reader.close();
     assert.equal(rows.n, 2);
+    store.close();
+  });
+
+  test("drops 200 OK JSON rate-limit bodies over real HTTP (Addendum 6)", async () => {
+    const store = new MbTilesStore(dbPath);
+    const downloader = createDownloader({
+      getStore: () => store,
+      tileServerUrl: `${baseUrl}/ratelimited/{z}/{x}/{y}.png`,
+      userAgent: "IntegrationTest/1.0",
+      throttleMs: 1,
+      sleepFn: () => Promise.resolve(),
+    });
+
+    downloader.start([{ z: 8, x: 14, y: 141, yTms: 114 }]);
+
+    await new Promise((resolve, reject) => {
+      const check = () => {
+        if (!downloader.status().isDownloading) resolve();
+        else if (requests.length > 11) reject(new Error("runaway loop"));
+        else setImmediate(check);
+      };
+      check();
+    });
+
+    // Every attempt returned a JSON body: dropped, retried through the
+    // escalating penalty waits, failed after the cap, nothing inserted
+    const status = downloader.status();
+    assert.equal(status.state, "completed");
+    assert.equal(status.failed, 1);
+    assert.equal(status.completed, 0);
+    assert.equal(requests.length, 11);
+
+    const { DatabaseSync } = require("node:sqlite");
+    const reader = new DatabaseSync(dbPath);
+    const rows = reader.prepare("SELECT COUNT(*) AS n FROM tiles").get();
+    reader.close();
+    assert.equal(rows.n, 0);
     store.close();
   });
 });

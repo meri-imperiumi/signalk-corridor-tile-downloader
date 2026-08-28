@@ -66,6 +66,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   monitor with ETA and cancel, and a storage panel with guarded VACUUM
   — styled per the Signal K "Tactical Sci-Fi" spec with passive
   day/night mode reactivity.
+- Tile provider selection (SPEC Addendum 6): new `tileProvider`
+  setting (`Open Waters Seamap` default, or `OpenSeaMap`) drives the
+  default tile server URL — `tiles.openwaters.io/seamap` or
+  `tiles.openseamap.org/seamark` — so downloads source modern
+  Open Waters raster PNGs while legacy installs keep their OpenSeaMap
+  source until they switch. `tileServerUrl` becomes an optional custom
+  override (empty or a stored provider default follows the selection);
+  the provider also sets its payload-validation profile, and `GET
+  /status` and the web UI status header surface the active provider.
+  The output remains a universal raster PNG MBTiles overlay
+  (`format=png`, `type=overlay`) consumable by any XYZ tile client.
+- Defensive media-type validation (SPEC Addendum 6): successful
+  responses must carry exactly an `image/png` Content-Type
+  (parameters and case tolerated). JSON or HTML bodies — providers'
+  rate-limit/error responses — are dropped, logged as failures, and
+  trigger the escalating backoff throttle; the tiny-placeholder
+  threshold is per provider (500 bytes for OpenSeaMap, 300 for Open
+  Waters).
 - Test suite: tile math, tiered corridor geometry, MBTiles store
   (including concurrent-reader WAL check), downloader behavior
   (throttle, backoff, rate-limit escalation, circuit breaker,

@@ -32,8 +32,45 @@ const PLUGIN_ID = "signalk-corridor-tile-downloader";
 /** Default output inside the directory watched by charts-provider-simple. */
 const DEFAULT_OUTPUT_PATH = "~/.signalk/charts-simple/passage_cache.mbtiles";
 
-/** Default OpenSeaMap seamark overlay tiles. */
-const DEFAULT_TILE_URL = "https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png";
+/**
+ * Supported seamark overlay providers (SPEC Addendum 6). Each entry
+ * defines the default slippy URL template and the defensive-fetching
+ * profile for its responses:
+ *
+ * - Open Waters Seamap (default): modern pre-rendered raster PNGs;
+ *   answers rate limits with JSON bodies, so tiny-placeholder
+ *   rejection kicks in below 300 bytes
+ * - OpenSeaMap: the classic seamark overlay; 500-byte baseline from
+ *   SPEC Addendum 2
+ */
+const TILE_PROVIDERS = {
+  "Open Waters Seamap": {
+    urlTemplate: "https://tiles.openwaters.io/seamap/{z}/{x}/{y}.png",
+    minTileBytes: 300,
+  },
+  OpenSeaMap: {
+    urlTemplate: "https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png",
+    minTileBytes: 500,
+  },
+};
+
+const DEFAULT_TILE_PROVIDER = "Open Waters Seamap";
+
+/**
+ * Finds the provider whose default URL template matches the given
+ * stored value, so a saved template that merely mirrors a provider
+ * default keeps following the provider selection instead of being
+ * mistaken for a custom override.
+ *
+ * @param {string} urlTemplate
+ * @returns {string|null} Provider name
+ */
+function providerForUrlTemplate(urlTemplate) {
+  for (const [name, provider] of Object.entries(TILE_PROVIDERS)) {
+    if (provider.urlTemplate === urlTemplate) return name;
+  }
+  return null;
+}
 
 const DEFAULT_USER_AGENT = "SignalK-Corridor-Downloader/1.0";
 
@@ -87,6 +124,14 @@ function expandHome(p) {
 /**
  * Normalizes plugin configuration, applying defaults and clamps.
  *
+ * Tile provider resolution (SPEC Addendum 6): an explicit
+ * `tileProvider` selection drives the default URL template. A
+ * `tileServerUrl` that is empty or equal to any provider default is
+ * "derived" and follows the selection; anything else is a custom
+ * override. Legacy configs (no `tileProvider` saved) infer the
+ * provider from a matching stored template, so pre-Addendum-6
+ * OpenSeaMap installs keep their source until the user switches.
+ *
  * @param {object} [options] - Raw configuration from the admin UI
  * @returns {object} Resolved configuration
  */
@@ -98,13 +143,25 @@ function resolveConfig(options = {}) {
   maxZoom = Math.min(22, Math.max(0, maxZoom));
   if (minZoom > maxZoom) [minZoom, maxZoom] = [maxZoom, minZoom];
 
-  let tileServerUrl = String(options.tileServerUrl || DEFAULT_TILE_URL).trim();
+  const storedUrl = String(options.tileServerUrl || "").trim();
+  const tileProvider =
+    TILE_PROVIDERS[options.tileProvider] != null
+      ? options.tileProvider
+      : (providerForUrlTemplate(storedUrl) ?? DEFAULT_TILE_PROVIDER);
+
+  // A stored template that mirrors a provider default is derived, not
+  // custom: it follows the provider selection (SPEC Addendum 6).
+  const isCustomUrl =
+    storedUrl !== "" && providerForUrlTemplate(storedUrl) == null;
+  let tileServerUrl = isCustomUrl
+    ? storedUrl
+    : TILE_PROVIDERS[tileProvider].urlTemplate;
   if (
     !tileServerUrl.includes("{z}") ||
     !tileServerUrl.includes("{x}") ||
     !tileServerUrl.includes("{y}")
   ) {
-    tileServerUrl = DEFAULT_TILE_URL;
+    tileServerUrl = TILE_PROVIDERS[tileProvider].urlTemplate;
   }
 
   return {
@@ -125,7 +182,9 @@ function resolveConfig(options = {}) {
     maxZoom,
     throttleMs: Math.max(0, Math.trunc(num(options.throttleMs, 500))),
     allowRecoveryOnMetered: options.allowRecoveryOnMetered !== false,
+    tileProvider,
     tileServerUrl,
+    minTileBytes: TILE_PROVIDERS[tileProvider].minTileBytes,
     userAgent: String(options.userAgent || DEFAULT_USER_AGENT),
   };
 }
@@ -216,11 +275,20 @@ module.exports = (app) => {
             "Delay between HTTP tile requests, to stay polite to public tile servers",
           default: 500,
         },
+        tileProvider: {
+          type: "string",
+          title: "Tile provider",
+          description:
+            "Which seamark overlay provider to download (SPEC Addendum 6). Selecting a provider sets the default tile server URL below and its payload validation rules; the output stays a universal raster PNG MBTiles either way",
+          enum: ["OpenSeaMap", "Open Waters Seamap"],
+          default: DEFAULT_TILE_PROVIDER,
+        },
         tileServerUrl: {
           type: "string",
-          title: "Tile server URL template",
-          description: "Slippy tile URL with {z}/{x}/{y} placeholders",
-          default: DEFAULT_TILE_URL,
+          title: "Custom tile server URL template",
+          description:
+            "Optional slippy tile URL with {z}/{x}/{y} placeholders. Leave empty to follow the selected provider's default URL",
+          default: "",
         },
         userAgent: {
           type: "string",
@@ -264,6 +332,7 @@ module.exports = (app) => {
         tileServerUrl: config.tileServerUrl,
         userAgent: config.userAgent,
         throttleMs: config.throttleMs,
+        minTileBytes: config.minTileBytes,
         allowRecoveryOnMetered: config.allowRecoveryOnMetered,
         fetchFn: options?.fetch,
         sleepFn: options?.sleep,
@@ -703,6 +772,7 @@ module.exports = (app) => {
           ? downloader.status()
           : { isDownloading: false, state: "idle" }),
         activeRouteName: lastRouteName,
+        tileProvider: config ? config.tileProvider : null,
         dbSizeBytes: store
           ? store.sizeBytes()
           : fileSizeBytes(config ? config.outputPath : ""),
@@ -775,7 +845,8 @@ module.exports = (app) => {
 
 module.exports.PLUGIN_ID = PLUGIN_ID;
 module.exports.DEFAULT_OUTPUT_PATH = DEFAULT_OUTPUT_PATH;
-module.exports.DEFAULT_TILE_URL = DEFAULT_TILE_URL;
+module.exports.TILE_PROVIDERS = TILE_PROVIDERS;
+module.exports.DEFAULT_TILE_PROVIDER = DEFAULT_TILE_PROVIDER;
 module.exports.DEFAULT_USER_AGENT = DEFAULT_USER_AGENT;
 module.exports.DEFAULT_STRATEGIC_MARGIN_NM = DEFAULT_STRATEGIC_MARGIN_NM;
 module.exports.DEFAULT_TACTICAL_MARGIN_NM = DEFAULT_TACTICAL_MARGIN_NM;
