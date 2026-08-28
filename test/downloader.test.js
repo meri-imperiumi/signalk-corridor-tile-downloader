@@ -62,6 +62,23 @@ const yieldingSleep = (sleeps) => async (ms) => {
   await new Promise((r) => setImmediate(r));
 };
 
+/**
+ * Sleep stub mirroring defaultSleep's semantics: polls the
+ * cancellation predicate (so wake() interrupts) and also resolves
+ * once the nominal delay elapses.
+ */
+const wakeableSleep = (sleeps) => (ms, isCancelled) =>
+  new Promise((resolve) => {
+    sleeps.push(ms);
+    const start = Date.now();
+    const timer = setInterval(() => {
+      if (isCancelled() || Date.now() - start >= ms) {
+        clearInterval(timer);
+        resolve();
+      }
+    }, 2);
+  });
+
 function tiles3() {
   return [
     { z: 8, x: 1, y: 2, yTms: 3 },
@@ -302,6 +319,196 @@ describe("downloader", () => {
     assert.equal(backoffDelay(1, 1000, 60000), 2000);
     assert.equal(backoffDelay(5, 1000, 60000), 32000);
     assert.equal(backoffDelay(10, 1000, 60000), 60000);
+  });
+});
+
+describe("recovery queue (Addendum 5)", () => {
+  test("recovery tiles are fetched before remaining passage tiles", async () => {
+    const store = fakeStore();
+    const gates = [];
+    const responses = [
+      // First passage tile fetch parks on a gate
+      () =>
+        new Promise((resolve) => gates.push(resolve)).then(() => okResponse()),
+      okResponse(),
+      okResponse(),
+    ];
+    const { downloader, calls } = makeDownloader(store, responses);
+    const passage = tiles3().slice(0, 2);
+    downloader.start(passage);
+    await new Promise((resolve) => {
+      const check = () => {
+        if (gates.length === 1) resolve();
+        else setImmediate(check);
+      };
+      check();
+    });
+
+    // Recovery arrives while the first passage tile is in flight
+    const recovery = { z: 8, x: 50, y: 50, yTms: 205 };
+    assert.equal(downloader.enqueueRecovery([recovery]), 1);
+    gates[0]();
+    await jobSettled(downloader);
+
+    // Order: passage t1 (gated), then recovery, then passage t2
+    assert.deepEqual(
+      calls.map((c) => c.url),
+      [
+        "https://tiles.example/seamark/8/1/2.png",
+        "https://tiles.example/seamark/8/50/50.png",
+        "https://tiles.example/seamark/8/4/5.png",
+      ],
+    );
+    const s = downloader.status();
+    assert.equal(s.completed, 3);
+    assert.equal(s.recoveryPending, 0);
+  });
+
+  test("enqueueRecovery with no running job starts a recovery job", async () => {
+    const store = fakeStore();
+    const { downloader, calls } = makeDownloader(store, [okResponse()]);
+    assert.equal(
+      downloader.enqueueRecovery([{ z: 8, x: 9, y: 9, yTms: 9 }]),
+      1,
+    );
+    assert.equal(downloader.status().jobType, "recovery");
+    await jobSettled(downloader);
+    const s = downloader.status();
+    assert.equal(s.state, "completed");
+    assert.equal(s.jobType, "recovery");
+    assert.equal(s.completed, 1);
+    assert.equal(calls.length, 1);
+  });
+
+  test("enqueueRecovery drops duplicates of tiles already queued", async () => {
+    const store = fakeStore();
+    const gates = [];
+    const responses = [
+      () =>
+        new Promise((resolve) => gates.push(resolve)).then(() => okResponse()),
+      okResponse(),
+      okResponse(),
+    ];
+    const { downloader, calls } = makeDownloader(store, responses);
+    downloader.start(tiles3().slice(0, 1));
+    await new Promise((resolve) => {
+      const check = () => {
+        if (gates.length === 1) resolve();
+        else setImmediate(check);
+      };
+      check();
+    });
+
+    const recovery = { z: 8, x: 50, y: 50, yTms: 205 };
+    assert.equal(downloader.enqueueRecovery([recovery]), 1);
+    assert.equal(downloader.enqueueRecovery([recovery]), 0);
+    gates[0]();
+    await jobSettled(downloader);
+    assert.equal(calls.filter((c) => c.url.endsWith("/8/50/50.png")).length, 1);
+  });
+
+  test("metered passage defers while recovery proceeds (wake)", async () => {
+    const store = fakeStore();
+    let netState = "metered";
+    const calls = [];
+    const dl = createDownloader({
+      store,
+      tileServerUrl: "https://tiles.example/seamark/{z}/{x}/{y}.png",
+      userAgent: "TestUA/1.0",
+      throttleMs: 0,
+      fetchFn: (url, init) => {
+        calls.push({ url, init });
+        return Promise.resolve(okResponse());
+      },
+      sleepFn: wakeableSleep([]),
+      getInternetState: () => netState,
+      allowRecoveryOnMetered: true,
+      log: () => {},
+    });
+
+    dl.start([{ z: 8, x: 1, y: 2, yTms: 3 }]); // passage, no override
+    await new Promise((r) => setTimeout(r, 25));
+    assert.equal(calls.length, 0, "passage suspended on metered");
+    assert.equal(dl.status().suspended, true);
+
+    // Recovery tile allowed on metered: wakes the loop, jumps the queue
+    assert.equal(dl.enqueueRecovery([{ z: 8, x: 7, y: 8, yTms: 9 }]), 1);
+    await new Promise((resolve) => {
+      const check = () => {
+        if (dl.status().completed >= 1) resolve();
+        else setImmediate(check);
+      };
+      check();
+    });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, "https://tiles.example/seamark/8/7/8.png");
+
+    // Passage tile still deferred until the state clears; the wake
+    // simulates the internet-state delta the plugin subscribes to
+    assert.equal(dl.status().completed, 1);
+    netState = "online";
+    dl.wake();
+    await jobSettled(dl);
+    const s = dl.status();
+    assert.equal(s.completed, 2);
+    assert.equal(calls[1].url, "https://tiles.example/seamark/8/1/2.png");
+  });
+
+  test("passage start preempts a suspended recovery job", async () => {
+    const store = fakeStore();
+    let netState = "offline";
+    const sleeps = [];
+    const dl = createDownloader({
+      store,
+      tileServerUrl: "https://tiles.example/seamark/{z}/{x}/{y}.png",
+      userAgent: "TestUA/1.0",
+      throttleMs: 0,
+      fetchFn: () => Promise.resolve(okResponse()),
+      sleepFn: wakeableSleep(sleeps),
+      getInternetState: () => netState,
+      log: () => {},
+    });
+
+    dl.enqueueRecovery([{ z: 8, x: 50, y: 50, yTms: 205 }]);
+    await new Promise((r) => setTimeout(r, 25));
+    assert.equal(dl.status().suspended, true);
+
+    // A user-triggered passage download preempts the recovery job
+    assert.equal(dl.start([{ z: 8, x: 1, y: 2, yTms: 3 }]), true);
+    const s = dl.status();
+    assert.equal(s.jobType, "passage");
+    assert.equal(s.recoveryPending, 1);
+    assert.equal(s.totalQueued, 2);
+
+    netState = "online";
+    dl.wake();
+    await jobSettled(dl);
+    const done = dl.status();
+    assert.equal(done.state, "completed");
+    assert.equal(done.completed, 2);
+    assert.equal(done.recoveryPending, 0);
+  });
+
+  test("recovery respects allowRecoveryOnMetered: false", async () => {
+    const store = fakeStore();
+    const netState = "metered";
+    const sleeps = [];
+    const dl = createDownloader({
+      store,
+      tileServerUrl: "https://tiles.example/seamark/{z}/{x}/{y}.png",
+      userAgent: "TestUA/1.0",
+      throttleMs: 0,
+      fetchFn: () => Promise.resolve(okResponse()),
+      sleepFn: yieldingSleep(sleeps),
+      getInternetState: () => netState,
+      allowRecoveryOnMetered: false,
+      log: () => {},
+    });
+    dl.enqueueRecovery([{ z: 8, x: 9, y: 9, yTms: 9 }]);
+    await new Promise((r) => setTimeout(r, 25));
+    assert.equal(dl.status().suspended, true);
+    dl.cancel();
+    await jobSettled(dl);
   });
 });
 

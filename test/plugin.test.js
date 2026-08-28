@@ -16,6 +16,8 @@ const PNG = Buffer.alloc(600, 0x89);
 function createMockApp() {
   let status = "";
   let error = "";
+  const deltaHandlers = [];
+  const subscriptions = [];
   const router = {
     routes: [],
     get(pathName, handler) {
@@ -39,6 +41,14 @@ function createMockApp() {
       error = s;
     },
     getPluginError: () => error,
+    subscriptionmanager: {
+      subscribe: (subscription, _unsubscribes, _onError, onDelta) => {
+        subscriptions.push(subscription);
+        deltaHandlers.push(onDelta);
+      },
+    },
+    getDeltaHandlers: () => deltaHandlers,
+    getSubscriptions: () => subscriptions,
     selfTree: {},
     getSelfPath(p) {
       return this.selfTree[p];
@@ -82,6 +92,37 @@ function route(app, method, pathName) {
   );
   assert.ok(found, `route ${method} ${pathName} registered`);
   return found.handler;
+}
+
+/** Signal K position delta for the subscribed handler. */
+function positionDelta(lat, lon) {
+  return {
+    updates: [
+      {
+        values: [
+          {
+            path: "navigation.position",
+            value: { latitude: lat, longitude: lon },
+          },
+        ],
+      },
+    ],
+  };
+}
+
+/** Fetch stub counting calls while returning valid tile bodies. */
+function countingFetch() {
+  const calls = [];
+  const fn = (url) => {
+    calls.push(url);
+    return Promise.resolve({
+      ok: true,
+      status: 200,
+      headers: undefined,
+      arrayBuffer: async () => PNG,
+    });
+  };
+  return { calls, fn };
 }
 
 function waitUntil(predicate, timeoutMs = 2000) {
@@ -151,9 +192,18 @@ describe("plugin", () => {
     });
   }
 
-  test("registers REST routes and reports idle status", () => {
+  test("registers REST routes, subscriptions and reports idle status", () => {
     startWithTestHooks();
     plugin.registerWithRouter(app.router);
+
+    // Addendum 5 wiring: position (recovery triggers) + internet state
+    // (immediate wake) subscriptions
+    const subscription = app.getSubscriptions()[0];
+    assert.ok(subscription);
+    assert.deepEqual(
+      subscription.subscribe.map((s) => s.path),
+      ["navigation.position", "network.internet.state"],
+    );
 
     const res = makeRes();
     route(app, "get", "/status")({}, res);
@@ -370,6 +420,202 @@ describe("plugin", () => {
     assert.equal(res.statusCode, 400);
   });
 
+  test("position drift triggers a recovery bubble download (Addendum 5)", async () => {
+    const fetch = countingFetch();
+    startWithTestHooks({ minZoom: 8, maxZoom: 12, fetch: fetch.fn });
+    plugin.registerWithRouter(app.router);
+    const onDelta = app.getDeltaHandlers()[0];
+
+    // First fix only establishes the baseline
+    onDelta(positionDelta(0, 0));
+    let res = makeRes();
+    route(app, "get", "/status")({}, res);
+    assert.equal(res.body.state, "idle");
+
+    // 1.2 NM of movement triggers verification: the 5 NM bubble at
+    // z8-12 has missing tiles, so a recovery job starts
+    onDelta(positionDelta(0.02, 0));
+    await waitUntil(() => {
+      const s = makeRes();
+      route(app, "get", "/status")({}, s);
+      return s.body.state === "completed";
+    });
+    res = makeRes();
+    route(app, "get", "/status")({}, res);
+    assert.equal(res.body.jobType, "recovery");
+    assert.ok(res.body.completed > 0);
+    assert.equal(res.body.completed, fetch.calls.length);
+
+    // The bubble tiles really are cached
+    const reader = new DatabaseSync(dbPath);
+    const rows = reader.prepare("SELECT COUNT(*) AS n FROM tiles").get();
+    reader.close();
+    assert.equal(rows.n, res.body.completed);
+  });
+
+  test("position verification is throttled to 1 NM of movement", async () => {
+    const fetch = countingFetch();
+    startWithTestHooks({ minZoom: 8, maxZoom: 12, fetch: fetch.fn });
+    plugin.registerWithRouter(app.router);
+    const onDelta = app.getDeltaHandlers()[0];
+
+    onDelta(positionDelta(0, 0)); // baseline
+    onDelta(positionDelta(0.005, 0)); // 0.3 NM
+    onDelta(positionDelta(0.008, 0)); // 0.48 NM from baseline
+    const res = makeRes();
+    route(app, "get", "/status")({}, res);
+    assert.equal(res.body.state, "idle");
+    assert.equal(fetch.calls.length, 0);
+
+    onDelta(positionDelta(0.02, 0)); // 1.2 NM from baseline
+    await waitUntil(() => {
+      const s = makeRes();
+      route(app, "get", "/status")({}, s);
+      return s.body.state === "completed";
+    });
+    assert.ok(fetch.calls.length > 0);
+  });
+
+  test("re-verification only queues missing tiles", async () => {
+    const fetch = countingFetch();
+    startWithTestHooks({ minZoom: 8, maxZoom: 12, fetch: fetch.fn });
+    plugin.registerWithRouter(app.router);
+    const onDelta = app.getDeltaHandlers()[0];
+
+    onDelta(positionDelta(0, 0));
+    onDelta(positionDelta(0.02, 0));
+    await waitUntil(() => {
+      const s = makeRes();
+      route(app, "get", "/status")({}, s);
+      return s.body.state === "completed";
+    });
+    const fetched = fetch.calls.length;
+    assert.ok(fetched > 0);
+
+    // Drift again: everything in the new bubble is already cached, so
+    // no new job and no new fetches
+    onDelta(positionDelta(0.04, 0));
+    await new Promise((r) => setTimeout(r, 25));
+    res = makeRes();
+    route(app, "get", "/status")({}, res);
+    assert.equal(fetch.calls.length, fetched);
+    assert.equal(res.body.state, "completed");
+  });
+
+  test("recovery defaults to allowed on metered, configurable off", async () => {
+    app.selfTree["network.internet.state.value"] = "metered";
+    const fetch = countingFetch();
+    startWithTestHooks({ minZoom: 8, maxZoom: 12, fetch: fetch.fn });
+    plugin.registerWithRouter(app.router);
+    const onDelta = app.getDeltaHandlers()[0];
+
+    // Default allowRecoveryOnMetered: true -> recovery runs on metered
+    onDelta(positionDelta(0, 0));
+    onDelta(positionDelta(0.02, 0));
+    await waitUntil(() => {
+      const s = makeRes();
+      route(app, "get", "/status")({}, s);
+      return s.body.state === "completed";
+    });
+    assert.ok(fetch.calls.length > 0);
+  });
+
+  test("recovery suspends on metered when disallowed", async () => {
+    app.selfTree["network.internet.state.value"] = "metered";
+    const fetch = countingFetch();
+    startWithTestHooks({
+      minZoom: 8,
+      maxZoom: 12,
+      fetch: fetch.fn,
+      sleep: yieldSleep,
+      allowRecoveryOnMetered: false,
+    });
+    plugin.registerWithRouter(app.router);
+    const onDelta = app.getDeltaHandlers()[0];
+
+    onDelta(positionDelta(0, 0));
+    onDelta(positionDelta(0.02, 0));
+    await waitUntil(() => {
+      const s = makeRes();
+      route(app, "get", "/status")({}, s);
+      return s.body.suspended === true;
+    });
+    const res = makeRes();
+    route(app, "get", "/status")({}, res);
+    assert.equal(res.body.jobType, "recovery");
+    assert.equal(fetch.calls.length, 0);
+
+    const cancel = makeRes();
+    route(app, "post", "/cancel")({}, cancel);
+    await waitUntil(() => {
+      const s = makeRes();
+      route(app, "get", "/status")({}, s);
+      return !s.body.isDownloading;
+    });
+  });
+
+  test("passage fetch preempts a suspended recovery job", async () => {
+    app.selfTree["network.internet.state.value"] = "offline";
+    const fetch = countingFetch();
+    startWithTestHooks({
+      minZoom: 8,
+      maxZoom: 12,
+      fetch: fetch.fn,
+      sleep: yieldSleep,
+    });
+    plugin.registerWithRouter(app.router);
+    const onDelta = app.getDeltaHandlers()[0];
+
+    // Recovery job starts but suspends offline
+    onDelta(positionDelta(0, 0));
+    onDelta(positionDelta(0.02, 0));
+    await waitUntil(() => {
+      const s = makeRes();
+      route(app, "get", "/status")({}, s);
+      return s.body.suspended === true && s.body.jobType === "recovery";
+    });
+
+    // The user's passage download is not blocked by the safety cache
+    const started = makeRes();
+    route(
+      app,
+      "post",
+      "/fetch-target",
+    )(
+      {
+        body: {
+          coordinates: [
+            { lat: 0.05, lon: 0.1 },
+            { lat: 0.05, lon: 0.2 },
+          ],
+        },
+      },
+      started,
+    );
+    assert.equal(started.statusCode, 200);
+    let res = makeRes();
+    route(app, "get", "/status")({}, res);
+    assert.equal(res.body.jobType, "passage");
+    assert.ok(res.body.recoveryPending > 0);
+
+    // Connectivity returns: recovery tiles drain first, passage completes
+    app.selfTree["network.internet.state.value"] = "online";
+    await waitUntil(() => {
+      const s = makeRes();
+      route(app, "get", "/status")({}, s);
+      return s.body.state === "completed";
+    });
+    res = makeRes();
+    route(app, "get", "/status")({}, res);
+    assert.equal(res.body.recoveryPending, 0);
+    assert.ok(res.body.completed >= started.body.totalTiles);
+
+    const reader = new DatabaseSync(dbPath);
+    const rows = reader.prepare("SELECT COUNT(*) AS n FROM tiles").get();
+    reader.close();
+    assert.ok(rows.n >= started.body.totalTiles);
+  });
+
   test("circuit breaker suspends on offline and resumes on online", async () => {
     app.selfTree["network.internet.state.value"] = "offline";
     startWithTestHooks({ sleep: yieldSleep });
@@ -477,6 +723,7 @@ describe("configuration", () => {
     assert.equal(config.strategicMarginNM, 50);
     assert.equal(config.tacticalMarginNM, 15);
     assert.equal(config.approachRadiusNM, 3);
+    assert.equal(config.allowRecoveryOnMetered, true);
     assert.equal(config.minZoom, 8);
     assert.equal(config.maxZoom, 14);
     assert.equal(config.throttleMs, 500);

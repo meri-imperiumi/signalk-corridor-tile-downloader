@@ -121,7 +121,9 @@ class CtdGpxDropzone extends HTMLElement {
   /** @param {object} status */
   update(status) {
     if (!status) return;
-    this._busy = status.isDownloading === true;
+    // A background recovery job must not block a user-triggered
+    // passage download (the backend preempts it).
+    this._busy = status.isDownloading === true && status.jobType !== "recovery";
     this.dzEl.classList.toggle("disabled", this._busy);
     this.dzEl.setAttribute("aria-disabled", String(this._busy));
   }

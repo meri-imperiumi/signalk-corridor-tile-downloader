@@ -2,6 +2,7 @@ const { describe, test } = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
+  bubbleTiles,
   bufferTiles,
   boundsWithMargin,
   corridorTier,
@@ -124,6 +125,39 @@ describe("swath buffer", () => {
 
   test("bufferTiles: zero margin means no buffer", () => {
     assert.deepEqual(bufferTiles(0, 21, 12), { nx: 0, ny: 0 });
+  });
+});
+
+describe("bubbleTiles (JIT recovery)", () => {
+  test("covers a radius bubble around the position", () => {
+    // At z12 tiles are ~5.3 NM wide on the equator, so a 5 NM radius
+    // pads one tile in each direction: a 3x3 block.
+    const tiles = bubbleTiles({ lat: 0, lon: 0 }, 12, 5);
+    assert.equal(tiles.length, 9);
+    assert.ok(tiles.some((t) => t.x === 2048 && t.y === 2048));
+    for (const t of tiles) {
+      assert.ok(t.x >= 2047 && t.x <= 2049);
+      assert.ok(t.y >= 2047 && t.y <= 2049);
+      assert.equal(t.yTms, 2 ** 12 - 1 - t.y);
+    }
+  });
+
+  test("clamps at the tile grid edge", () => {
+    const tiles = bubbleTiles({ lat: 0, lon: 179.999 }, 8, 5);
+    assert.ok(tiles.length > 0);
+    assert.ok(tiles.length < 9);
+    for (const t of tiles) {
+      assert.ok(t.x <= 255);
+      assert.ok(t.y < 256);
+    }
+  });
+
+  test("zero radius is just the containing tile", () => {
+    const tiles = bubbleTiles({ lat: -18.85, lon: -159.78 }, 10, 0);
+    assert.equal(tiles.length, 1);
+    const { lonToTileX: x, latToTileY: y } = require("../lib/geometry.js");
+    assert.equal(tiles[0].x, x(-159.78, 10));
+    assert.equal(tiles[0].y, y(-18.85, 10));
   });
 });
 

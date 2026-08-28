@@ -85,9 +85,10 @@ class CtdStatusHeader extends HTMLElement {
 /** Maps job state to the header badge text. */
 function jobLabel(status) {
   if (status.isDownloading) {
-    return status.suspended
-      ? `SUSPENDED (${status.suspendReason || "?"})`
-      : "DOWNLOADING";
+    if (status.suspended) {
+      return `SUSPENDED (${status.suspendReason || "?"})`;
+    }
+    return status.jobType === "recovery" ? "RECOVERY" : "DOWNLOADING";
   }
   switch (status.state) {
     case "completed":

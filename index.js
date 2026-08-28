@@ -21,7 +21,7 @@
 
 const os = require("node:os");
 const path = require("node:path");
-const { corridorTiles } = require("./lib/geometry.js");
+const { bubbleTiles, corridorTiles, distanceNM } = require("./lib/geometry.js");
 const { MbTilesStore, nodeSupportsSqlite } = require("./lib/mbtiles.js");
 const { createDownloader } = require("./lib/downloader.js");
 
@@ -43,6 +43,17 @@ const DEFAULT_USER_AGENT = "SignalK-Corridor-Downloader/1.0";
 const DEFAULT_STRATEGIC_MARGIN_NM = 50;
 const DEFAULT_TACTICAL_MARGIN_NM = 15;
 const DEFAULT_APPROACH_RADIUS_NM = 3;
+
+/**
+ * JIT position recovery (SPEC Addendum 5): safety-bubble radii per
+ * zoom band, and the distance a position must move before the cache
+ * is re-verified.
+ */
+const RECOVERY_TRIGGER_NM = 1;
+const RECOVERY_BANDS = [
+  { minZoom: 8, maxZoom: 12, radiusNM: 5 },
+  { minZoom: 13, maxZoom: 14, radiusNM: 2 },
+];
 
 /**
  * Safety valve: refuse to queue absurdly large corridor jobs (e.g. a
@@ -103,6 +114,7 @@ function resolveConfig(options = {}) {
     minZoom,
     maxZoom,
     throttleMs: Math.max(0, Math.trunc(num(options.throttleMs, 500))),
+    allowRecoveryOnMetered: options.allowRecoveryOnMetered !== false,
     tileServerUrl,
     userAgent: String(options.userAgent || DEFAULT_USER_AGENT),
   };
@@ -134,6 +146,9 @@ module.exports = (app) => {
   let downloader = null;
   let lastRouteName = null;
   let config = null;
+  /** Last position the recovery cache was verified against. */
+  let lastCheckedPosition = null;
+  const unsubscribes = [];
 
   const plugin = {
     id: PLUGIN_ID,
@@ -200,6 +215,13 @@ module.exports = (app) => {
           title: "User-Agent header",
           default: DEFAULT_USER_AGENT,
         },
+        allowRecoveryOnMetered: {
+          type: "boolean",
+          title: "Allow recovery fetches on metered connections",
+          description:
+            "When enabled, the just-in-time safety bubble around the vessel's position is also fetched on metered links (e.g. satellite). Passage corridor downloads still wait for your approval.",
+          default: true,
+        },
       },
     },
 
@@ -230,6 +252,7 @@ module.exports = (app) => {
         tileServerUrl: config.tileServerUrl,
         userAgent: config.userAgent,
         throttleMs: config.throttleMs,
+        allowRecoveryOnMetered: config.allowRecoveryOnMetered,
         fetchFn: options?.fetch,
         sleepFn: options?.sleep,
         getInternetState,
@@ -237,17 +260,154 @@ module.exports = (app) => {
         onProgress: () => publishStatus(),
       });
 
+      subscribeToDeltas();
+
       publishStatus();
     },
 
     stop: () => {
+      for (const unsubscribe of unsubscribes) {
+        try {
+          unsubscribe();
+        } catch {
+          // Already unsubscribed
+        }
+      }
+      unsubscribes.length = 0;
       downloader?.cancel();
       downloader = null;
       store?.close();
       store = null;
+      lastCheckedPosition = null;
       setStatus?.("Corridor downloader stopped");
     },
   };
+
+  /**
+   * Subscribes to `navigation.position` (JIT recovery triggers) and
+   * `network.internet.state` (immediate wake on connectivity
+   * transitions, SPEC Addendum 5).
+   */
+  function subscribeToDeltas() {
+    if (!app.subscriptionmanager?.subscribe) return;
+    const subscription = {
+      context: "vessels.self",
+      subscribe: [
+        { path: "navigation.position", policy: "instant" },
+        { path: "network.internet.state", policy: "instant" },
+      ],
+    };
+    app.subscriptionmanager.subscribe(
+      subscription,
+      unsubscribes,
+      (err) =>
+        app.error(`${PLUGIN_ID}: subscription error: ${err.message ?? err}`),
+      (delta) => handleDelta(delta),
+    );
+  }
+
+  /**
+   * Dispatches subscribed deltas to the recovery and wake handlers.
+   *
+   * @param {object} delta - Signal K delta
+   */
+  function handleDelta(delta) {
+    if (!delta?.updates) return;
+    for (const update of delta.updates) {
+      if (!update.values) continue;
+      for (const value of update.values) {
+        if (value.path === "navigation.position") {
+          handlePositionValue(value.value);
+        } else if (value.path === "network.internet.state") {
+          // Wake the loop immediately on a connectivity transition
+          // instead of waiting out the 10 s suspend poll.
+          downloader?.wake();
+        }
+      }
+    }
+  }
+
+  /**
+   * Handles a navigation.position value: verifies the recovery cache
+   * once the vessel has moved more than 1 NM (Haversine) from the last
+   * checked position (SPEC Addendum 5). The first fix after startup
+   * only establishes the baseline.
+   *
+   * @param {unknown} value - `{latitude, longitude}` position value
+   */
+  function handlePositionValue(value) {
+    if (!store || !downloader) return;
+    if (!value || typeof value !== "object") return;
+    const position = {
+      lat: Number(value.latitude),
+      lon: Number(value.longitude),
+    };
+    if (
+      !Number.isFinite(position.lat) ||
+      !Number.isFinite(position.lon) ||
+      position.lat < -90 ||
+      position.lat > 90 ||
+      position.lon < -180 ||
+      position.lon > 180
+    ) {
+      return;
+    }
+    if (lastCheckedPosition === null) {
+      // The first fix after startup only establishes the baseline:
+      // verification requires actual movement (SPEC Addendum 5).
+      lastCheckedPosition = position;
+      return;
+    }
+    if (distanceNM(lastCheckedPosition, position) < RECOVERY_TRIGGER_NM) {
+      return;
+    }
+    lastCheckedPosition = position;
+    verifyRecoveryCache(position);
+  }
+
+  /**
+   * Builds the recovery bubble tiles for a position (5 NM for zooms
+   * 8-12, 2 NM for 13-14, clipped to the configured zoom range),
+   * checks each against the cache and queues the missing ones into
+   * the high-priority recovery queue (SPEC Addendum 5).
+   *
+   * @param {{lat: number, lon: number}} position
+   */
+  function verifyRecoveryCache(position) {
+    const tiles = [];
+    const seen = new Set();
+    for (const band of RECOVERY_BANDS) {
+      const minZoom = Math.max(config.minZoom, band.minZoom);
+      const maxZoom = Math.min(config.maxZoom, band.maxZoom);
+      for (let z = minZoom; z <= maxZoom; z++) {
+        for (const tile of bubbleTiles(position, z, band.radiusNM)) {
+          const key = `${tile.z}/${tile.x}/${tile.yTms}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          tiles.push(tile);
+        }
+      }
+    }
+
+    const missing = tiles.filter(
+      (tile) => !store.hasTile(tile.z, tile.x, tile.yTms),
+    );
+    if (missing.length === 0) {
+      app.debug(
+        `${PLUGIN_ID}: position recovery cache complete around ${position.lat.toFixed(4)},${position.lon.toFixed(4)}`,
+      );
+      return;
+    }
+
+    const queued = downloader.enqueueRecovery(missing, {
+      routeName: `Recovery @ ${position.lat.toFixed(3)},${position.lon.toFixed(3)}`,
+    });
+    if (queued > 0) {
+      app.debug(
+        `${PLUGIN_ID}: queued ${queued} recovery tiles around ${position.lat.toFixed(4)},${position.lon.toFixed(4)}`,
+      );
+    }
+  }
 
   /**
    * Reflects queue state into the Signal K admin UI.
@@ -259,8 +419,12 @@ module.exports = (app) => {
     }
     const s = downloader.status();
     if (s.isDownloading) {
+      const label =
+        s.jobType === "recovery" ? "Recovery fetch" : "Downloading corridor";
+      const done = s.completed + s.skipped;
+      const suspended = s.suspended ? " — suspended" : "";
       setStatus?.(
-        `Downloading corridor: ${s.completed + s.skipped}/${s.totalQueued} tiles (${s.failed} failed)`,
+        `${label}: ${done}/${s.totalQueued} tiles (${s.failed} failed)${suspended}`,
       );
     } else if (s.state === "completed") {
       setStatus?.(
@@ -345,7 +509,7 @@ module.exports = (app) => {
       throw httpError(503, "Tile store unavailable (check plugin log)");
     }
     const running = downloader.status();
-    if (running.isDownloading) {
+    if (running.isDownloading && running.jobType !== "recovery") {
       throw httpError(409, "A download job is already in progress");
     }
 
@@ -494,5 +658,7 @@ module.exports.DEFAULT_STRATEGIC_MARGIN_NM = DEFAULT_STRATEGIC_MARGIN_NM;
 module.exports.DEFAULT_TACTICAL_MARGIN_NM = DEFAULT_TACTICAL_MARGIN_NM;
 module.exports.DEFAULT_APPROACH_RADIUS_NM = DEFAULT_APPROACH_RADIUS_NM;
 module.exports.MAX_QUEUE_SIZE = MAX_QUEUE_SIZE;
+module.exports.RECOVERY_TRIGGER_NM = RECOVERY_TRIGGER_NM;
+module.exports.RECOVERY_BANDS = RECOVERY_BANDS;
 module.exports.expandHome = expandHome;
 module.exports.resolveConfig = resolveConfig;

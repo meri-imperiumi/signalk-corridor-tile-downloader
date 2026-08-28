@@ -107,6 +107,7 @@ class CorridorProgress extends HTMLElement {
           <span id="counts">0 / 0 tiles</span>
           <span class="failed" id="failed">0 failed</span>
           <span id="cached">0 cached</span>
+          <span id="recovery"></span>
           <span id="rate"></span>
           <span id="eta">ETA —</span>
         </div>
@@ -130,6 +131,8 @@ class CorridorProgress extends HTMLElement {
     this.failedEl = shadow.getElementById("failed");
     /** @type {HTMLElement} */
     this.cachedEl = shadow.getElementById("cached");
+    /** @type {HTMLElement} */
+    this.recoveryEl = shadow.getElementById("recovery");
     /** @type {HTMLElement} */
     this.rateEl = shadow.getElementById("rate");
     /** @type {HTMLElement} */
@@ -161,6 +164,11 @@ class CorridorProgress extends HTMLElement {
     this.countsEl.textContent = `${done} / ${total} tiles`;
     this.failedEl.textContent = `${status.failed || 0} failed`;
     this.cachedEl.textContent = `${status.skipped || 0} cached`;
+    const recoveryPending = status.recoveryPending || 0;
+    this.recoveryEl.textContent =
+      recoveryPending > 0 && status.jobType !== "recovery"
+        ? `${recoveryPending} recovery queued`
+        : "";
     this.rateEl.textContent =
       status.rate > 0 ? `${(status.rate * 60).toFixed(1)} tiles/min` : "";
     this.etaEl.textContent = status.isDownloading
@@ -199,7 +207,8 @@ class CorridorProgress extends HTMLElement {
 /** Maps status to the state badge text. */
 function badgeFor(status) {
   if (status.isDownloading) {
-    return status.suspended ? "SUSPENDED" : "DOWNLOADING";
+    if (status.suspended) return "SUSPENDED";
+    return status.jobType === "recovery" ? "RECOVERY" : "DOWNLOADING";
   }
   switch (status.state) {
     case "completed":

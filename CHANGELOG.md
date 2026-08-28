@@ -34,6 +34,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   metered link, resuming automatically. A per-job "Force download on
   metered connection" override (SPEC Addendum 4) is exposed in the web
   UI and the REST API.
+- Just-in-time position recovery cache (SPEC Addendum 5): the plugin
+  subscribes to `navigation.position` and, once the vessel moves more
+  than 1 NM (Haversine) from the last checked position, verifies a
+  safety bubble (5 NM for zooms 8-12, 2 NM for zooms 13-14, clipped to
+  the configured zoom range) against the cache. Missing tiles are
+  queued into a high-priority recovery queue that the downloader
+  always drains before remaining passage tiles; recovery jobs respect
+  the new `allowRecoveryOnMetered` setting (default true), wake
+  immediately on `network.internet.state` transitions, and never block
+  a user-triggered passage download (they are preempted, carrying
+  their pending tiles over as priority work).
 - REST API under `/plugins/signalk-corridor-tile-downloader/`:
   `GET /status`, `POST /fetch-active-route`, `POST /fetch-target`,
   `POST /cancel`, `POST /vacuum`.
