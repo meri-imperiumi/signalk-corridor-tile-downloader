@@ -17,6 +17,16 @@
 const panelCss = (extra = "") => `
   :host { display: block; }
 
+  /* Shadow roots don't inherit the border-box reset from style.css;
+     without it every padded card (padding 44px + borders 2px) is
+     taller than its stretched grid host and overlaps the row below
+     on the desktop two-column layout. */
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
   /* Local theme color defaults to teal; the theme-* classes swap it
      and tint backgrounds (spec §5). */
   .sk-card {

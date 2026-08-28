@@ -9,7 +9,10 @@ const { MbTilesStore } = require("../lib/mbtiles.js");
 const { createDownloader } = require("../lib/downloader.js");
 
 /** A realistic tile body (>= 500 bytes). */
-const PNG = Buffer.alloc(600, 0x89);
+const PNG = Buffer.concat([
+  require("../lib/downloader.js").PNG_SIGNATURE,
+  Buffer.alloc(592, 0x89),
+]);
 
 describe("downloader integration (real fetch + real store)", () => {
   let server;

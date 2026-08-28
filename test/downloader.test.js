@@ -4,14 +4,19 @@ const assert = require("node:assert/strict");
 const {
   backoffDelay,
   createDownloader,
-  MIN_TILE_BYTES,
+  isPngBody,
+  MIN_PNG_BYTES,
+  PNG_SIGNATURE,
   RATE_LIMIT_PENALTY_BASE_MS,
   RATE_LIMIT_PENALTY_MAX_MS,
   SUSPEND_POLL_MS,
 } = require("../lib/downloader.js");
 
-/** A realistic tile body (>= MIN_TILE_BYTES). */
-const PNG = Buffer.alloc(600, 7);
+/** A realistic tile body: valid PNG signature plus payload. */
+const PNG = Buffer.concat([PNG_SIGNATURE, Buffer.alloc(592, 7)]);
+
+/** A realistic empty-ocean overlay tile (fully transparent PNG). */
+const EMPTY_OCEAN_PNG = Buffer.concat([PNG_SIGNATURE, Buffer.alloc(326, 7)]);
 
 /**
  * In-memory tile store recording writes, with optional pre-cached tiles.
@@ -172,11 +177,11 @@ describe("downloader", () => {
     assert.ok(!calls.some((c) => c.url.endsWith("/8/1/2.png")));
   });
 
-  test("discards undersized 200 OK placeholder bodies (Addendum 2)", async () => {
+  test("discards non-PNG bodies labeled image/png (placeholder defense)", async () => {
     const store = fakeStore();
-    const tiny = Buffer.alloc(MIN_TILE_BYTES - 1, 7);
+    const junk = Buffer.alloc(600, 7); // wrong signature, generous size
     const { downloader, calls, sleeps } = makeDownloader(store, [
-      okResponse(tiny),
+      okResponse(junk),
     ]);
     downloader.start([{ z: 8, x: 1, y: 2, yTms: 3 }]);
     await jobSettled(downloader);
@@ -186,6 +191,18 @@ describe("downloader", () => {
     assert.deepEqual(sleeps, []);
     assert.equal(downloader.status().failed, 1);
     assert.equal(store.inserts.length, 0);
+  });
+
+  test("accepts tiny transparent ocean tiles (real OpenSeaMap payloads are 334 bytes)", async () => {
+    const store = fakeStore();
+    const { downloader } = makeDownloader(store, [okResponse(EMPTY_OCEAN_PNG)]);
+    downloader.start([{ z: 8, x: 1, y: 2, yTms: 3 }]);
+    await jobSettled(downloader);
+
+    // An empty sea tile is a success, not a placeholder failure
+    assert.equal(downloader.status().failed, 0);
+    assert.equal(downloader.status().completed, 1);
+    assert.equal(store.inserts.length, 1);
   });
 
   test("429 escalates the throttle 5 min -> 10 min, then resets on success", async () => {
@@ -698,24 +715,18 @@ describe("payload validation (Addendum 6)", () => {
     assert.equal(downloader.status().completed, 1);
   });
 
-  test("minTileBytes is configurable (Open Waters 300-byte rule)", async () => {
-    const sparse = Buffer.alloc(400, 7); // above 300, below 500
+  test("structural PNG minimum: shorter than a valid PNG is rejected", async () => {
+    const truncated = Buffer.concat([
+      PNG_SIGNATURE,
+      Buffer.alloc(MIN_PNG_BYTES - 9, 7),
+    ]);
+    assert.ok(!isPngBody(truncated));
 
-    const permissive = fakeStore();
-    const openWaters = makeDownloader(permissive, [okResponse(sparse)], {
-      minTileBytes: 300,
-    });
-    openWaters.downloader.start([{ z: 8, x: 1, y: 2, yTms: 3 }]);
-    await jobSettled(openWaters.downloader);
-    assert.equal(openWaters.downloader.status().completed, 1);
-
-    // Under the default (OpenSeaMap, Addendum 2) baseline it is a
-    // placeholder: counted as a failure, never inserted
-    const strict = fakeStore();
-    const baseline = makeDownloader(strict, [okResponse(sparse)]);
-    baseline.downloader.start([{ z: 8, x: 1, y: 2, yTms: 3 }]);
-    await jobSettled(baseline.downloader);
-    assert.equal(baseline.downloader.status().failed, 1);
-    assert.equal(strict.inserts.length, 0);
+    const store = fakeStore();
+    const { downloader } = makeDownloader(store, [okResponse(truncated)]);
+    downloader.start([{ z: 8, x: 1, y: 2, yTms: 3 }]);
+    await jobSettled(downloader);
+    assert.equal(downloader.status().failed, 1);
+    assert.equal(store.inserts.length, 0);
   });
 });

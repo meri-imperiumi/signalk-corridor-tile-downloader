@@ -7,7 +7,10 @@ const { DatabaseSync } = require("node:sqlite");
 
 const pluginFactory = require("../index.js");
 
-const PNG = Buffer.alloc(600, 0x89);
+const PNG = Buffer.concat([
+  require("../lib/downloader.js").PNG_SIGNATURE,
+  Buffer.alloc(592, 0x89),
+]);
 
 /**
  * Mock Signal K app: plugin status/error recorders, configurable
@@ -218,7 +221,7 @@ describe("plugin", () => {
     assert.equal(typeof res.body.dbSizeBytes, "number");
     assert.equal(res.body.outputPath, dbPath);
     assert.equal(res.body.activeRouteName, null);
-    assert.equal(res.body.tileProvider, "Open Waters Seamap");
+    assert.equal(res.body.tileProvider, "OpenSeaMap");
   });
 
   test("cache file is created lazily with real bounds on first fetch", () => {
@@ -515,9 +518,9 @@ describe("plugin", () => {
     assert.ok(fetch.calls.length > 0);
     assert.ok(
       fetch.calls.every((url) =>
-        url.startsWith("https://tiles.openwaters.io/seamap/"),
+        url.startsWith("https://tiles.openseamap.org/seamark/"),
       ),
-      "default provider is Open Waters Seamap",
+      "default provider is OpenSeaMap",
     );
   });
 
@@ -851,13 +854,12 @@ describe("configuration", () => {
     assert.equal(config.minZoom, 8);
     assert.equal(config.maxZoom, 14);
     assert.equal(config.throttleMs, 500);
-    // Addendum 6: Open Waters Seamap is the default provider
-    assert.equal(config.tileProvider, "Open Waters Seamap");
+    // OpenSeaMap is the default raster provider (Open Waters went vector-only)
+    assert.equal(config.tileProvider, "OpenSeaMap");
     assert.equal(
       config.tileServerUrl,
-      "https://tiles.openwaters.io/seamap/{z}/{x}/{y}.png",
+      "https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png",
     );
-    assert.equal(config.minTileBytes, 300);
     assert.equal(config.userAgent, "SignalK-Corridor-Downloader/1.0");
     assert.ok(config.outputPath.endsWith("passage_cache.mbtiles"));
   });
@@ -869,23 +871,31 @@ describe("configuration", () => {
     });
     assert.equal(openSeaMap.tileProvider, "OpenSeaMap");
     assert.equal(openSeaMap.tileServerUrl, providers.OpenSeaMap.urlTemplate);
-    assert.equal(openSeaMap.minTileBytes, 500);
 
-    const openWaters = pluginFactory.resolveConfig({
-      tileProvider: "Open Waters Seamap",
-    });
-    assert.equal(
-      openWaters.tileServerUrl,
-      providers["Open Waters Seamap"].urlTemplate,
-    );
-    assert.equal(openWaters.minTileBytes, 300);
-
-    // Switching the provider rewrites a stored default template
+    // A stored default template is derived, not custom: it follows the
+    // provider selection
     const switched = pluginFactory.resolveConfig({
-      tileProvider: "OpenSeaMap",
-      tileServerUrl: providers["Open Waters Seamap"].urlTemplate,
+      tileServerUrl: providers.OpenSeaMap.urlTemplate,
     });
     assert.equal(switched.tileServerUrl, providers.OpenSeaMap.urlTemplate);
+
+    // A custom template overrides the provider default
+    const custom = pluginFactory.resolveConfig({
+      tileServerUrl: "https://tiles.example.org/{z}/{x}/{y}.png",
+    });
+    assert.equal(
+      custom.tileServerUrl,
+      "https://tiles.example.org/{z}/{x}/{y}.png",
+    );
+
+    // Legacy configs naming the retired vector-only Open Waters
+    // provider migrate to the OpenSeaMap default
+    const legacy = pluginFactory.resolveConfig({
+      tileProvider: "Open Waters Seamap",
+      tileServerUrl: "",
+    });
+    assert.equal(legacy.tileProvider, "OpenSeaMap");
+    assert.equal(legacy.tileServerUrl, providers.OpenSeaMap.urlTemplate);
 
     // Unknown values fall back to the default provider
     assert.equal(

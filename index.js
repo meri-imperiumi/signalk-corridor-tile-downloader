@@ -37,24 +37,21 @@ const DEFAULT_OUTPUT_PATH = "~/.signalk/charts-simple/passage_cache.mbtiles";
  * defines the default slippy URL template and the defensive-fetching
  * profile for its responses:
  *
- * - Open Waters Seamap (default): modern pre-rendered raster PNGs;
- *   answers rate limits with JSON bodies, so tiny-placeholder
- *   rejection kicks in below 300 bytes
- * - OpenSeaMap: the classic seamark overlay; 500-byte baseline from
- *   SPEC Addendum 2
+ * Tile providers (SPEC Addendum 6). Open Waters Seamap was removed
+ * in 2026: the service migrated to vector `.pbf` tiles and no longer
+ * serves raster PNGs at all, which this plugin's zero-dependency
+ * raster pipeline (and its charts-provider-simple consumer) requires.
+ * Saved configs naming the dead provider fall back to OpenSeaMap via
+ * `resolveConfig`; other raster sources can be used through the
+ * custom `tileServerUrl` template.
  */
 const TILE_PROVIDERS = {
-  "Open Waters Seamap": {
-    urlTemplate: "https://tiles.openwaters.io/seamap/{z}/{x}/{y}.png",
-    minTileBytes: 300,
-  },
   OpenSeaMap: {
     urlTemplate: "https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png",
-    minTileBytes: 500,
   },
 };
 
-const DEFAULT_TILE_PROVIDER = "Open Waters Seamap";
+const DEFAULT_TILE_PROVIDER = "OpenSeaMap";
 
 /**
  * Finds the provider whose default URL template matches the given
@@ -184,7 +181,6 @@ function resolveConfig(options = {}) {
     allowRecoveryOnMetered: options.allowRecoveryOnMetered !== false,
     tileProvider,
     tileServerUrl,
-    minTileBytes: TILE_PROVIDERS[tileProvider].minTileBytes,
     userAgent: String(options.userAgent || DEFAULT_USER_AGENT),
   };
 }
@@ -279,8 +275,8 @@ module.exports = (app) => {
           type: "string",
           title: "Tile provider",
           description:
-            "Which seamark overlay provider to download (SPEC Addendum 6). Selecting a provider sets the default tile server URL below and its payload validation rules; the output stays a universal raster PNG MBTiles either way",
-          enum: ["OpenSeaMap", "Open Waters Seamap"],
+            "Which seamark overlay provider to download. Open Waters Seamap was removed after that service switched to vector-only tiles; the custom tile server URL below accepts any raster PNG source",
+          enum: ["OpenSeaMap"],
           default: DEFAULT_TILE_PROVIDER,
         },
         tileServerUrl: {
@@ -332,7 +328,6 @@ module.exports = (app) => {
         tileServerUrl: config.tileServerUrl,
         userAgent: config.userAgent,
         throttleMs: config.throttleMs,
-        minTileBytes: config.minTileBytes,
         allowRecoveryOnMetered: config.allowRecoveryOnMetered,
         fetchFn: options?.fetch,
         sleepFn: options?.sleep,

@@ -12,6 +12,7 @@ import { MODE_PATH, SignalKStream } from "./signalk-stream.js";
 import "./components/status-header.js";
 import "./components/route-panel.js";
 import "./components/gpx-dropzone.js";
+import "./components/target-panel.js";
 import "./components/progress-monitor.js";
 import "./components/storage-panel.js";
 
@@ -30,10 +31,11 @@ class CtdApp extends HTMLElement {
     const route = document.createElement("ctd-route-panel");
     const progress = document.createElement("corridor-progress");
     const gpx = document.createElement("ctd-gpx-dropzone");
+    const target = document.createElement("ctd-target-panel");
     const storage = document.createElement("ctd-storage-panel");
     const frame = document.createElement("div");
     frame.className = "frame";
-    frame.append(header, route, gpx, progress, storage);
+    frame.append(header, route, gpx, target, progress, storage);
     shadow.append(frameStyle(), frame);
 
     /** @type {import("./components/status-header.js").CtdStatusHeader} */
@@ -42,6 +44,8 @@ class CtdApp extends HTMLElement {
     this.routeEl = route;
     /** @type {import("./components/gpx-dropzone.js").CtdGpxDropzone} */
     this.gpxEl = gpx;
+    /** @type {import("./components/target-panel.js").CtdTargetPanel} */
+    this.targetEl = target;
     /** @type {import("./components/progress-monitor.js").CorridorProgress} */
     this.progressEl = progress;
     /** @type {import("./components/storage-panel.js").CtdStoragePanel} */
@@ -59,6 +63,7 @@ class CtdApp extends HTMLElement {
       globalThis.localStorage?.getItem(METERED_STORAGE_KEY) === "1";
     this.routeEl.metered = this._forceOnMetered;
     this.gpxEl.forceOnMetered = this._forceOnMetered;
+    this.targetEl.metered = this._forceOnMetered;
   }
 
   connectedCallback() {
@@ -89,6 +94,7 @@ class CtdApp extends HTMLElement {
     this._forceOnMetered = value;
     this.routeEl.metered = value;
     this.gpxEl.forceOnMetered = value;
+    this.targetEl.metered = value;
     try {
       globalThis.localStorage?.setItem(METERED_STORAGE_KEY, value ? "1" : "0");
     } catch {
@@ -128,6 +134,7 @@ class CtdApp extends HTMLElement {
     if (online && status) {
       this.routeEl.update(status);
       this.gpxEl.update(status);
+      this.targetEl.update(status);
       this.progressEl.update(status);
       this.storageEl.update(status);
     }
@@ -175,6 +182,7 @@ function frameStyle() {
         grid-template-columns: 1fr 1fr;
       }
       .frame > ctd-status-header,
+      .frame > ctd-target-panel,
       .frame > corridor-progress,
       .frame > ctd-storage-panel {
         grid-column: 1 / -1;

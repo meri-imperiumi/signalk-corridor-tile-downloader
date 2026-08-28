@@ -7,8 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Downloads no longer fail on every tile: the default Open Waters
+  Seamap provider was removed after that service migrated to
+  vector-only `.pbf` tiles (its old raster PNG endpoints now answer
+  404). OpenSeaMap is the default raster provider again; saved configs
+  naming Open Waters Seamap migrate to OpenSeaMap automatically.
+- Empty-ocean overlay tiles are no longer rejected as rate-limit
+  placeholders: fully transparent OpenSeaMap ocean tiles measure ~334
+  bytes, below the old 500-byte floor. Tile bodies are now validated
+  by PNG signature (plus a 45-byte structural minimum) instead of a
+  size threshold, so tiny transparent sea tiles succeed while
+  mislabeled JSON/HTML bodies still fail.
+- Desktop two-column layout: panels no longer overlap vertically. The
+  `border-box` reset could not pierce the shadow DOM, so every card
+  rendered 46px taller than its grid row and collided with the row
+  below; the reset now ships inside each shadow root.
+
 ### Added
 
+- Manual target coordinate trigger: a new "Target coordinate corridor"
+  panel fetches the multi-tier corridor around a single lat/lon point
+  when there is no active route or GPX file. Input is validated
+  client-side and honors the shared metered-connection override.
 - Initial implementation of the Corridor Tile Downloader: a native,
   zero-dependency Signal K plugin that pre-caches marine tile corridors
   into a standard MBTiles file for offline navigation via
