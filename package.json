@@ -17,7 +17,12 @@
   "license": "EUPL-1.2",
   "signalk-plugin-enabled-by-default": false,
   "signalk": {
-    "displayName": "Corridor Tile Downloader"
+    "displayName": "Corridor Tile Downloader",
+    "appIcon": "./icon.png",
+    "requires": [
+      "signalk-charts-provider-simple",
+      "@meri-imperiumi/signalk-internet"
+    ]
   },
   "engines": {
     "node": ">=22.5.0"
