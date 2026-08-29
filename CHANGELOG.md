@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- `transformStyle` strips the upstream chart author's demo camera
+  (`center`/`zoom`/`bearing`/`pitch`) from the mirrored styles
+  (`/assets/style.json` and `/assets/style-ol.json`). That camera points
+  at the author's showcase location (the Danish Baltic), not the
+  corridor this offline mirror covers, so it's wrong for every
+  consumer — and MapLibre applies it on style load, before a
+  consumer's own `fitBounds` runs, firing a high-zoom tile pyramid
+  across every source over a location the cache doesn't hold: a
+  barrage of 404s, and on a fresh mount before the consumer's track
+  resolves, a long stall on an uncached area. Leaflet-based consumers
+  (the dead-reckoning webapp) dodge this only because they set the
+  viewport themselves and never read the style's camera. The
+  per-source `bounds` advertised in 0.3.0 were meant to stop this, but
+  the low-zoom overview pyramid added in the same release inflates
+  `extentFromTilesFile` to world bounds, so the camera remained the
+  effective default view — stripping it closes the gap. Without a
+  style camera, MapLibre starts at a neutral world view that the
+  consumer re-fits from.
+
 ## [0.3.0] - 2026-08-28
 
 ### Added

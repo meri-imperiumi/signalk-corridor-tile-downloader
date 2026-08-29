@@ -56,6 +56,15 @@ function openWatersStyle() {
   return {
     version: 8,
     name: "seamap",
+    // The upstream style ships a demo camera pointing at the chart
+    // author's showcase location. transformStyle must strip it (see
+    // BATHYMETRY 8): an offline corridor mirror covers the vessel's
+    // sailed area, not this spot, so the camera is wrong for every
+    // consumer and MapLibre would render a tile pyramid here on load.
+    center: [10.2351, 56.16858],
+    zoom: 13.4,
+    bearing: 0,
+    pitch: 0,
     glyphs: "https://tiles.openwaters.io/fonts/{fontstack}/{range}.pbf",
     sprite: [
       {
@@ -983,6 +992,15 @@ describe("BATHYMETRY 8: style transform", () => {
     // Background layer stays; symbol layers stay (all sources cached)
     assert.ok(style.layers.some((l) => l.id === "background"));
     assert.ok(style.layers.some((l) => l.id === "seamark"));
+
+    // The upstream author's demo camera is stripped: it points at a
+    // showcase location unrelated to the cached corridor, and MapLibre
+    // applies it on style load — firing a high-zoom tile barrage over
+    // an uncached area before a consumer's fitBounds runs.
+    assert.equal(style.center, undefined, "demo center stripped");
+    assert.equal(style.zoom, undefined, "demo zoom stripped");
+    assert.equal(style.bearing, undefined, "demo bearing stripped");
+    assert.equal(style.pitch, undefined, "demo pitch stripped");
   });
 
   test("uncached source + its layers dropped (graceful degradation)", async () => {

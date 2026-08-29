@@ -2247,6 +2247,24 @@ module.exports = (app) => {
    */
   function transformStyle(style, baseUrl, { olCompatible = false } = {}) {
     const out = structuredClone(style);
+    // Strip the upstream chart author's demo camera (`center`/`zoom`/
+    // `bearing`/`pitch`) from the mirrored style. These point at the
+    // author's showcase location (e.g. the Danish Baltic), not the
+    // corridor this offline mirror actually covers, so they're wrong for
+    // every consumer. MapLibre applies them on style load — before a
+    // consumer's own fitBounds runs — firing a high-zoom tile pyramid
+    // across every source over a location the cache doesn't hold, a
+    // barrage of 404s (and, on a fresh mount before the track resolves,
+    // a long stall on an uncached area). Leaflet-based consumers (DR)
+    // dodge this only because they set the viewport themselves and never
+    // read the style's camera. Without a style camera, MapLibre starts
+    // at a neutral world view the consumer re-fits from. (Freeboard SK
+    // / ol-mapbox-style set their own view too, so dropping these is
+    // inert there.)
+    delete out.center;
+    delete out.zoom;
+    delete out.bearing;
+    delete out.pitch;
     const sourceConfigs = new Map(
       activeSourceConfigs().map((source) => [source.id, source]),
     );
