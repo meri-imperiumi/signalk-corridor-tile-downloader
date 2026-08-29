@@ -5,7 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { DatabaseSync } = require("node:sqlite");
 
-const { MbTilesStore } = require("../lib/mbtiles.js");
+const { MbTilesStore, isIoError } = require("../lib/mbtiles.js");
 
 let dir;
 let dbPath;
@@ -30,6 +30,13 @@ afterEach(() => {
     // ignore
   }
 });
+
+/** Build an error shaped like a node:sqlite failure. */
+function sqliteErr(errcode) {
+  const err = new Error("simulated");
+  err.errcode = errcode;
+  return err;
+}
 
 describe("MbTilesStore", () => {
   test("creates the database, schema and required metadata", () => {
@@ -155,5 +162,95 @@ describe("MbTilesStore", () => {
     assert.ok(store.sizeBytes() > 0);
     assert.ok(sizeBefore > 0);
     store.close();
+  });
+});
+
+describe("MbTilesStore WAL sidecar self-healing", () => {
+  test("heals when charts-provider housekeeping deletes the live WAL", () => {
+    const store = new MbTilesStore(dbPath);
+    store.insertTile(10, 200, 300, Buffer.from([1, 2, 3]));
+
+    // The consumer plugin's startup cleanup unlinks live *.mbtiles-wal
+    // sidecars. With committed frames stranded in the unlinked WAL, the
+    // stale wal-index (-shm) wedges fresh read-only opens — its
+    // chart-metadata endpoint — with SQLITE_IOERR "disk I/O error".
+    fs.unlinkSync(`${dbPath}-wal`);
+    assert.equal(fs.existsSync(`${dbPath}-wal`), false);
+    assert.throws(
+      () => {
+        const poisoned = new DatabaseSync(dbPath, { readOnly: true });
+        poisoned.prepare("SELECT COUNT(*) AS n FROM tiles").get();
+        poisoned.close();
+      },
+      (err) => err.errcode === 522 || err.errcode === 10,
+      "expected the wedged wal-index to fail read-only opens",
+    );
+
+    // The endpoint leaks its failed connection (the query threw before
+    // its close), pinning the stale wal-index. The heal must still work
+    // around it.
+    const leaked = new DatabaseSync(dbPath, { readOnly: true });
+
+    // The next per-tile touchpoint detects the missing sidecar and
+    // rebuilds the handle: the heal checkpoints the unlinked WAL's
+    // frames into the main database (the tile survives), discards the
+    // pinned wal-index and recreates a consistent -wal/-shm pair.
+    assert.equal(store.hasTile(10, 200, 300), true);
+    assert.ok(fs.existsSync(`${dbPath}-wal`));
+
+    const reader = new DatabaseSync(dbPath, { readOnly: true });
+    assert.equal(reader.prepare("SELECT COUNT(*) AS n FROM tiles").get().n, 1);
+    reader.close();
+    try {
+      leaked.close();
+    } catch {
+      // The leaked connection is already broken beyond closing
+    }
+
+    // Reads keep working after the leak is gone too
+    const afterLeak = new DatabaseSync(dbPath, { readOnly: true });
+    assert.equal(
+      afterLeak.prepare("SELECT COUNT(*) AS n FROM tiles").get().n,
+      1,
+    );
+    afterLeak.close();
+
+    // Writes continue on the healed handle and stay visible to readers
+    assert.equal(store.insertTile(10, 200, 301, Buffer.from([4])), true);
+    const after = new DatabaseSync(dbPath, { readOnly: true });
+    assert.equal(after.prepare("SELECT COUNT(*) AS n FROM tiles").get().n, 2);
+    after.close();
+    store.close();
+  });
+
+  test("insertTile retries once after a transient SQLITE_IOERR", () => {
+    const store = new MbTilesStore(dbPath);
+    let threw = false;
+    // Poison the prepared statement: the first run fails with the
+    // wedged-wal-index signature, forcing the store to rebuild its
+    // handle and re-run the insert on the fresh one.
+    store._insertTile = {
+      run() {
+        threw = true;
+        throw sqliteErr(522);
+      },
+    };
+
+    assert.equal(store.insertTile(8, 1, 1, Buffer.from([9])), true);
+    assert.ok(threw);
+    // The healed handle re-prepared the statement and holds the tile
+    assert.equal(store.hasTile(8, 1, 1), true);
+    store.close();
+  });
+
+  test("isIoError recognizes the SQLITE_IOERR family", () => {
+    assert.equal(isIoError(sqliteErr(10)), true); // base SQLITE_IOERR
+    assert.equal(isIoError(sqliteErr(522)), true); // SHORTREAD
+    assert.equal(isIoError(sqliteErr(266)), true); // READ
+    assert.equal(isIoError(sqliteErr(1546)), true); // TRUNCATE
+    assert.equal(isIoError(sqliteErr(1)), false); // SQLITE_ERROR
+    assert.equal(isIoError(sqliteErr(6)), false); // SQLITE_LOCKED
+    assert.equal(isIoError(new Error("disk I/O error")), false);
+    assert.equal(isIoError(null), false);
   });
 });

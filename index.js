@@ -459,6 +459,10 @@ module.exports = (app) => {
         },
       });
 
+      // Reconcile sidecars wedged by an earlier provider housekeeping
+      // strike before any reader (or resumed job) touches the cache.
+      sweepStaleSidecars();
+
       subscribeToDeltas();
 
       // Crash-safe resume: restart any passage job journaled before
@@ -485,6 +489,34 @@ module.exports = (app) => {
       setStatus?.("Corridor downloader stopped");
     },
   };
+
+  /**
+   * Sweeps stale WAL sidecars left around the cache file by an earlier
+   * charts-provider-simple housekeeping strike. A wedged `-shm`/`-wal`
+   * pair (stale wal-index referencing a deleted or emptied WAL) fails
+   * every read-only open — the provider's chart-metadata endpoint —
+   * with `disk I/O error` until a read-write connection reconciles the
+   * index. Opening and closing our store does exactly that, and the
+   * clean close checkpoints and removes the sidecars. No-op when no
+   * sidecars linger.
+   */
+  function sweepStaleSidecars() {
+    const wal = `${config.outputPath}-wal`;
+    const shm = `${config.outputPath}-shm`;
+    if (!fs.existsSync(wal) && !fs.existsSync(shm)) return;
+    if (!fs.existsSync(config.outputPath)) return;
+    try {
+      ensureStore();
+      releaseStoreIfIdle();
+      app.debug(
+        `${PLUGIN_ID}: reconciled stale WAL sidecars at ${config.outputPath}`,
+      );
+    } catch (err) {
+      app.error(
+        `${PLUGIN_ID}: cannot reconcile stale WAL sidecars: ${err.message}`,
+      );
+    }
+  }
 
   /**
    * Subscribes to `navigation.position` (JIT recovery triggers) and

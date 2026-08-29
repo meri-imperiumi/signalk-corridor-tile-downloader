@@ -6,6 +6,7 @@ const path = require("node:path");
 const { DatabaseSync } = require("node:sqlite");
 
 const pluginFactory = require("../index.js");
+const { MbTilesStore } = require("../lib/mbtiles.js");
 
 const PNG = Buffer.concat([
   require("../lib/downloader.js").PNG_SIGNATURE,
@@ -217,6 +218,29 @@ describe("plugin", () => {
       ...overrides,
     });
   }
+
+  test("start() sweeps stale WAL sidecars left around the cache", () => {
+    // A previous charts-provider housekeeping strike can leave sidecar
+    // files behind. The sweep opens and closes our store, whose clean
+    // close checkpoints and removes them — so the provider's own
+    // startup cleanup finds nothing to delete and the boot-order race
+    // over live sidecars cannot recur, and any stale wal-index is
+    // reconciled by the read-write pass.
+    const seed = new MbTilesStore(dbPath);
+    seed.insertTile(8, 1, 1, Buffer.from([1]));
+    seed.close();
+    fs.writeFileSync(`${dbPath}-wal`, Buffer.alloc(0));
+    fs.writeFileSync(`${dbPath}-shm`, Buffer.alloc(0));
+
+    startWithTestHooks();
+
+    assert.equal(fs.existsSync(`${dbPath}-wal`), false);
+    assert.equal(fs.existsSync(`${dbPath}-shm`), false);
+
+    const reader = new DatabaseSync(dbPath, { readOnly: true });
+    assert.equal(reader.prepare("SELECT COUNT(*) AS n FROM tiles").get().n, 1);
+    reader.close();
+  });
 
   test("registers REST routes, subscriptions and reports idle status", () => {
     startWithTestHooks();

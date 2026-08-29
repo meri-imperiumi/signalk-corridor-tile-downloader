@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Self-healing MBTiles store: signalk-charts-provider-simple's startup
+  housekeeping deletes live `*.mbtiles-wal` sidecars, wedging the
+  shared wal-index (`-shm`) and failing every read-only open — tile
+  serving and its chart-metadata endpoint — with SQLite `disk I/O
+  error` (SQLITE_IOERR 522, e.g. opening `meta` for
+  `passage_cache.mbtiles`) for as long as the downloader kept its
+  store open. The store now detects the interference on the download
+  loop's per-tile touchpoints — the sidecar vanished, or was recreated
+  empty by a failed reader and carries a different inode — and
+  rebuilds its handle: a checkpoint first lands the unlinked WAL's
+  committed tiles in the main database (nothing is refetched), then a
+  fresh, consistent sidecar pair is created for readers. Statement
+  failures from the SQLITE_IOERR family are retried once on the healed
+  handle, and `plugin.start()` sweeps stale sidecars left around the
+  cache so the provider's next housekeeping pass finds nothing to
+  delete.
 ### Added
 
 - Open Waters vector map support (the `vector.md` blueprint): the
