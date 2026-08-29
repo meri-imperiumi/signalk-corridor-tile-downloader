@@ -50,6 +50,7 @@ const {
   corridorTiles,
   distanceNM,
   isValidCoordinate,
+  overviewTiles,
 } = require("./lib/geometry.js");
 const { MbTilesStore, nodeSupportsSqlite, extentFromTilesFile } =
   require("./lib/mbtiles.js");
@@ -642,6 +643,8 @@ module.exports = (app) => {
         minZoom: {
           type: "integer",
           title: "Minimum zoom",
+          description:
+            "Corridor zooms start here; a small low-zoom overview pyramid (z0 up to one below this level, over the corridor bounds) is always fetched alongside so zooming out keeps showing cached context",
           default: 8,
         },
         maxZoom: {
@@ -1935,7 +1938,12 @@ module.exports = (app) => {
     // One corridor per source (STEP 4): same geometry, per-source zoom
     // caps, tile list ordered by source priority (seamap first, DEMs
     // last). A source whose ceiling sits below the configured minimum
-    // still fetches its own top zoom.
+    // still fetches its own top zoom. Below its effective minimum each
+    // source additionally fetches the low-zoom overview pyramid over
+    // the corridor bounds — a covering rectangle of z0..min-1 tiles so
+    // zooming out always finds cached context instead of blanking
+    // (overzoom cannot go downward: no ancestors exist below the
+    // lowest cached zoom). Re-runs and resumes skip what stores hold.
     const combined = [];
     const zoomCaps = {};
     const perSourceCount = {};
@@ -1955,6 +1963,11 @@ module.exports = (app) => {
       zoomCaps[source.id] = maxZoom;
       perSourceCount[source.id] = tiles.length;
       for (const tile of tiles) {
+        combined.push({ ...tile, source: source.id });
+      }
+      const overview = overviewTiles(bounds, minZoom - 1);
+      perSourceCount[source.id] += overview.length;
+      for (const tile of overview) {
         combined.push({ ...tile, source: source.id });
       }
     }

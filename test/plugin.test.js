@@ -159,6 +159,19 @@ function countingFetch() {
   return { calls, fn };
 }
 
+/** Zoom levels present in an .mbtiles tiles table. */
+function zoomsInStore(filePath) {
+  const db = new DatabaseSync(filePath, { readOnly: true });
+  try {
+    return db
+      .prepare("SELECT DISTINCT zoom_level AS z FROM tiles ORDER BY z")
+      .all()
+      .map((row) => row.z);
+  } finally {
+    db.close();
+  }
+}
+
 const webpHeaders = {
   get: (n) => (n.toLowerCase() === "content-type" ? "image/webp" : null),
 };
@@ -661,6 +674,44 @@ describe("plugin", () => {
     );
     assert.equal(res.statusCode, 200);
     assert.ok(res.body.totalTiles > 0);
+  });
+
+  test("corridor jobs fetch the low-zoom overview pyramid", async () => {
+    const fetch1 = countingFetch();
+    startWithTestHooks({ minZoom: 3, fetch: fetch1.fn });
+    plugin.registerWithRouter(app.router);
+
+    const res = makeRes();
+    route(
+      app,
+      "post",
+      "/fetch-target",
+    )({ body: { coordinates: [{ lat: 0, lon: 0 }] } }, res);
+    assert.equal(res.statusCode, 200);
+    await waitUntil(() => {
+      const s = makeRes();
+      route(app, "get", "/status")({}, s);
+      return s.body.state === "completed";
+    });
+
+    // Pyramid zooms (z0..minZoom-1) landed alongside the z3 corridor
+    const zooms = zoomsInStore(dbPath);
+    assert.ok(zooms.includes(0), "z0 overview tile cached");
+    assert.ok(zooms.includes(1), "z1 overview tile cached");
+    assert.ok(zooms.includes(2), "z2 overview tile cached");
+    assert.ok(zooms.includes(3), "corridor minimum cached");
+    assert.equal(zooms.filter((z) => z > 3).length, 0, "no zooms above max");
+
+    // Re-running the same corridor queues nothing: the pyramid is
+    // cached too, the pending filter skips it like any corridor tile
+    const res2 = makeRes();
+    route(
+      app,
+      "post",
+      "/fetch-target",
+    )({ body: { coordinates: [{ lat: 0, lon: 0 }] } }, res2);
+    assert.equal(res2.statusCode, 200);
+    assert.equal(res2.body.totalTiles, 0, "re-run refetches nothing");
   });
 
   test("fetch-active-route without an active route returns 404", () => {
@@ -1442,9 +1493,12 @@ describe("plugin", () => {
         return s.body.state === "completed";
       });
       assert.ok(fetch2.calls.length > 0);
+      // The journaled geometry drives the rebuild: corridor at the
+      // journaled z1 plus its low-zoom overview pyramid (z0). The
+      // wider live config (maxZoom 3) must not leak into the resume.
       assert.ok(
-        fetch2.calls.every((url) => /\/1\/\d+\/\d+\.png$/.test(url)),
-        "only journaled z1 tiles fetched",
+        fetch2.calls.every((url) => /\/[01]\/\d+\/\d+\.png$/.test(url)),
+        "only journaled zoom levels (z1 corridor + z0 overview) fetched",
       );
       assert.equal(fetch2.calls.length, res.body.totalTiles);
     });

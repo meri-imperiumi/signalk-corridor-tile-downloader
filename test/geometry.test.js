@@ -374,3 +374,42 @@ describe("boundsWithMargin", () => {
     assert.equal(clamped[2], 180);
   });
 });
+
+describe("overviewTiles (low-zoom pyramid)", () => {
+  test("covers the bounding rectangle from z0 through toZoom", () => {
+    const { overviewTiles } = require("../lib/geometry.js");
+    // A ~2°x2° box around the Marquesas
+    const tiles = overviewTiles([-160.5, -10.5, -158.5, -8.5], 2);
+    const byZoom = new Map();
+    for (const t of tiles) {
+      byZoom.set(t.z, (byZoom.get(t.z) ?? 0) + 1);
+    }
+    assert.equal(byZoom.get(0), 1, "single z0 world tile");
+    assert.equal(byZoom.get(1), 1, "one z1 tile covers 2°x2°");
+    assert.ok(byZoom.get(2) >= 1 && byZoom.get(2) <= 4, "z2 handful");
+    // TMS rows are the flipped XYZ y
+    for (const t of tiles) {
+      assert.equal(t.yTms, 2 ** t.z - 1 - t.y);
+    }
+  });
+
+  test("crosses the antimeridian without wrapping", () => {
+    const { overviewTiles } = require("../lib/geometry.js");
+    // A box straddling ±180°: lonToTileX(east) < lonToTileX(west) at
+    // every zoom ≥ 1, so the x range collapses — the pyramid cannot
+    // wrap the seam, exactly like the corridor tiles it accompanies.
+    // Only the z0 world tile (which spans the seam by definition)
+    // survives.
+    const tiles = overviewTiles([179.5, -1, -179.5, 1], 3);
+    assert.deepEqual(tiles, [{ z: 0, x: 0, y: 0, yTms: 0 }]);
+  });
+
+  test("degrades quietly on bad input", () => {
+    const { overviewTiles } = require("../lib/geometry.js");
+    assert.deepEqual(overviewTiles(null, 7), []);
+    assert.deepEqual(overviewTiles([1, 2, 3], 7), []);
+    // toZoom 0 → just the containing z0 tile
+    const z0 = overviewTiles([20, 60, 21, 60.5], 0);
+    assert.deepEqual(z0, [{ z: 0, x: 0, y: 0, yTms: 0 }]);
+  });
+});

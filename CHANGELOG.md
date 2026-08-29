@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Low-zoom overview pyramid: every corridor job additionally fetches
+  all tiles from z0 up to one below the effective per-source minimum
+  over the corridor's bounding rectangle (a bounded few hundred tiles
+  per source at most). Without it, zooming out below the cached
+  minimum blanked the chart in every client — overzoom only reuses
+  ancestors, and none exist below the lowest cached zoom. The pyramid
+  rides the same queue/priority/throttle machinery (corridor tiles
+  first, overview after per source), is journaled implicitly (it
+  derives from the journaled bounds + minZoom, so resumes rebuild it),
+  and re-runs skip whatever the stores already hold.
+
 - True cache extents everywhere: coverage is now derived from the
   tiles tables (`MbTilesStore.extentFromTiles()` and a read-only
   `extentFromTilesFile()` probe) instead of trusting the `bounds`
