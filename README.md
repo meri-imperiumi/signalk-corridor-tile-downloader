@@ -4,7 +4,11 @@ Signal K server plugin that pre-caches marine chart tiles along a route for offl
 
 A just-in-time recovery cache subscribes to `navigation.position` and fetches a safety bubble around the vessel whenever it drifts outside the cached corridor, a network circuit breaker suspends downloads while the internet connection is offline or metered.
 
-Supported source:
+## Supported sources
 
 * [Open Waters Seamap](https://openwaters.io/charts/seamap/)
 * [OpenSeaMap](https://openseamap.org/index.php?id=openseamap&no_cache=1)
+
+## Data usage
+
+Data usage depends on the source being used and the length of the route. The ~600NM passage from Aitutaki in Cook Islands to Niue is about 550MB.
