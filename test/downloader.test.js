@@ -5,6 +5,7 @@ const { gunzipSync } = require("node:zlib");
 const {
   backoffDelay,
   createDownloader,
+  DEFAULT_SOURCE,
   isMvtBody,
   isPngBody,
   EMPTY_PBF,
@@ -116,16 +117,32 @@ function makeDownloader(store, responses, opts = {}) {
   const sleeps = [];
   const calls = [];
   let i = 0;
+  let mockTime = 1000;
   const fetchFn = (url, init) => {
     calls.push({ url, init });
     const r = responses[i < responses.length ? i : responses.length - 1];
     i += 1;
     return typeof r === "function" ? r(url, init) : Promise.resolve(r);
   };
-  const sleepFn = yieldingSleep(sleeps);
+  // Mock clock: yieldingSleep advances mockTime so awaitThrottle sees
+  // exact elapsed values without real-time jitter.
+  const sleepFn = async (ms) => {
+    sleeps.push(ms);
+    mockTime += ms;
+    await new Promise((r) => setImmediate(r));
+  };
+  const nowFn = () => mockTime;
+  // tileServerUrl/format in opts (old API) are mapped to the new
+  // per-source templates/formats maps so existing test call sites work
+  // unchanged.
+  const template =
+    opts.tileServerUrl ?? "https://tiles.example/seamark/{z}/{x}/{y}.png";
+  const formatProfile = opts.format ?? "png";
   const downloader = createDownloader({
     getStore: () => store,
-    tileServerUrl: "https://tiles.example/seamark/{z}/{x}/{y}.png",
+    templates: { [DEFAULT_SOURCE]: template },
+    formats: { [DEFAULT_SOURCE]: formatProfile },
+    format: formatProfile,
     userAgent: "TestUA/1.0",
     throttleMs: 0,
     maxRetries: 2,
@@ -133,6 +150,7 @@ function makeDownloader(store, responses, opts = {}) {
     backoffMaxMs: 60000,
     fetchFn,
     sleepFn,
+    nowFn,
     log: () => {},
     ...opts,
   });
@@ -227,8 +245,12 @@ describe("downloader", () => {
       RATE_LIMIT_PENALTY_BASE_MS,
       RATE_LIMIT_PENALTY_BASE_MS * 2,
     ]);
-    // Success reset the penalty: the inter-tile throttle is back to config
-    assert.equal(sleeps[2], 100);
+    // The pre-request shared throttle (awaitThrottle) accounts for
+    // elapsed time: after 15 min of rate-limit backoff sleeps, the
+    // 100 ms inter-tile throttle is already satisfied, so no third
+    // sleep is recorded. Success reset the penalty (throttleMs is back
+    // to the configured 100 ms).
+    assert.equal(sleeps.length, 2);
     assert.equal(calls.length, 4);
     const s = downloader.status();
     assert.equal(s.completed, 2);
@@ -268,16 +290,20 @@ describe("downloader", () => {
     assert.equal(s.state, "completed");
   });
 
-  test("fails fast on permanent HTTP 404 without retries", async () => {
+  test("skips permanent HTTP 404 tiles without retries (regional coverage)", async () => {
     const store = fakeStore();
     const { downloader, calls, sleeps } = makeDownloader(store, [
       { ok: false, status: 404, headers: undefined },
     ]);
     downloader.start([{ z: 8, x: 1, y: 2, yTms: 3 }]);
     await jobSettled(downloader);
+    // 404 = per-tile skip, never a failure (BATHYMETRY.md FAILURES)
     assert.equal(calls.length, 1);
     assert.deepEqual(sleeps, []);
-    assert.equal(downloader.status().failed, 1);
+    assert.equal(downloader.status().skipped, 1);
+    assert.equal(downloader.status().failed, 0);
+    assert.equal(downloader.status().completed, 0);
+    assert.equal(store.inserts.length, 0);
   });
 
   test("persistent 429s fail the tile after the penalty-wait cap", async () => {
@@ -450,7 +476,9 @@ describe("recovery queue (Addendum 5)", () => {
     const calls = [];
     const dl = createDownloader({
       getStore: () => store,
-      tileServerUrl: "https://tiles.example/seamark/{z}/{x}/{y}.png",
+      templates: {
+        [DEFAULT_SOURCE]: "https://tiles.example/seamark/{z}/{x}/{y}.png",
+      },
       userAgent: "TestUA/1.0",
       throttleMs: 0,
       fetchFn: (url, init) => {
@@ -497,7 +525,9 @@ describe("recovery queue (Addendum 5)", () => {
     const sleeps = [];
     const dl = createDownloader({
       getStore: () => store,
-      tileServerUrl: "https://tiles.example/seamark/{z}/{x}/{y}.png",
+      templates: {
+        [DEFAULT_SOURCE]: "https://tiles.example/seamark/{z}/{x}/{y}.png",
+      },
       userAgent: "TestUA/1.0",
       throttleMs: 0,
       fetchFn: () => Promise.resolve(okResponse()),
@@ -532,7 +562,9 @@ describe("recovery queue (Addendum 5)", () => {
     const sleeps = [];
     const dl = createDownloader({
       getStore: () => store,
-      tileServerUrl: "https://tiles.example/seamark/{z}/{x}/{y}.png",
+      templates: {
+        [DEFAULT_SOURCE]: "https://tiles.example/seamark/{z}/{x}/{y}.png",
+      },
       userAgent: "TestUA/1.0",
       throttleMs: 0,
       fetchFn: () => Promise.resolve(okResponse()),

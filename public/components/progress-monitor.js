@@ -76,6 +76,19 @@ class CorridorProgress extends HTMLElement {
           color: var(--text-muted);
           font-variant-numeric: tabular-nums;
         }
+        /* One progress line per mirrored tileset (vector sources
+           first, DEMs last) while a job runs. */
+        .sources {
+          display: flex;
+          flex-direction: column;
+          gap: 0.15rem;
+          margin-top: 0.6rem;
+          font-family: ui-monospace, "Fira Code", monospace;
+          font-size: 0.75rem;
+          color: var(--text-muted);
+          font-variant-numeric: tabular-nums;
+        }
+        .sources:empty { display: none; }
         /* Only alarm-red when there is something to report (spec §1: no
            crying-wolf states) */
         .stats .failed.has-failures { color: var(--color-red); }
@@ -105,6 +118,7 @@ class CorridorProgress extends HTMLElement {
           <span class="badge" id="badge">IDLE</span>
         </div>
         <progress id="bar" max="100" value="0"></progress>
+        <div class="sources" id="sources"></div>
         <div class="stats">
           <span id="counts">0 / 0 tiles</span>
           <span class="failed" id="failed">0 failed</span>
@@ -128,6 +142,8 @@ class CorridorProgress extends HTMLElement {
     this.badgeEl = shadow.getElementById("badge");
     /** @type {HTMLProgressElement} */
     this.barEl = shadow.getElementById("bar");
+    /** @type {HTMLElement} */
+    this.sourcesEl = shadow.getElementById("sources");
     /** @type {HTMLElement} */
     this.countsEl = shadow.getElementById("counts");
     /** @type {HTMLElement} */
@@ -167,6 +183,7 @@ class CorridorProgress extends HTMLElement {
 
     this.badgeEl.textContent = badgeFor(status);
     this.countsEl.textContent = `${done} / ${total} tiles`;
+    this.renderSources(status.bySource);
     this.failedEl.textContent = `${status.failed || 0} failed`;
     this.failedEl.classList.toggle("has-failures", (status.failed || 0) > 0);
     this.cachedEl.textContent = `${status.skipped || 0} cached`;
@@ -197,6 +214,24 @@ class CorridorProgress extends HTMLElement {
 
     this.actionsEl.classList.toggle("hidden", !status.isDownloading);
     this.cardEl.className = `sk-card ${themeFor(status)}`;
+  }
+
+  /**
+   * Per-source progress lines (BATHYMETRY.md STEP 8): one per
+   * mirrored tileset that has work queued.
+   *
+   * @param {object|undefined} bySource
+   */
+  renderSources(bySource) {
+    this.sourcesEl.replaceChildren();
+    for (const [id, counts] of Object.entries(bySource ?? {})) {
+      if (!counts || counts.totalQueued <= 0) continue;
+      const line = document.createElement("span");
+      const done =
+        (counts.completed || 0) + (counts.skipped || 0) + (counts.failed || 0);
+      line.textContent = `${id} ${done}/${counts.totalQueued}`;
+      this.sourcesEl.append(line);
+    }
   }
 
   async cancelJob() {

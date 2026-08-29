@@ -75,8 +75,8 @@ class CtdStoragePanel extends HTMLElement {
     if (!status) return;
     this._busy = status.isDownloading === true;
     this.vacuumEl.disabled = this._busy;
-    this.sizeEl.textContent = formatSI(status.dbSizeBytes, "B");
-    this.pathEl.textContent = status.outputPath || "";
+    this.sizeEl.textContent = formatSI(totalDbSize(status.dbSizeBytes), "B");
+    this.pathEl.textContent = storageLabel(status.outputPaths);
   }
 
   async vacuum() {
@@ -117,6 +117,22 @@ class CtdStoragePanel extends HTMLElement {
     this.resultEl.textContent = text;
     this.resultEl.className = isError ? "result error" : "result";
   }
+}
+
+/** Total on-disk size across every mirrored store. */
+function totalDbSize(dbSizeBytes) {
+  if (typeof dbSizeBytes === "number") return dbSizeBytes;
+  return Object.values(dbSizeBytes ?? {}).reduce(
+    (sum, n) => sum + (Number.isFinite(n) ? n : 0),
+    0,
+  );
+}
+
+/** Seamap path plus a count of the derived sibling stores. */
+function storageLabel(outputPaths) {
+  const paths = Object.values(outputPaths ?? {}).filter(Boolean);
+  if (paths.length <= 1) return paths[0] ?? "";
+  return `${paths[0]} (+${paths.length - 1} tilesets)`;
 }
 
 customElements.define("ctd-storage-panel", CtdStoragePanel);

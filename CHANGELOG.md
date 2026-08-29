@@ -27,6 +27,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   delete.
 ### Added
 
+- Six-source Open Waters bathymetry mirror (the `BATHYMETRY.md`
+  blueprint): an Open Waters job now downloads all six chart tile
+  sources — seamap (pbf, z0-14), seascape-vector (pbf, z0-15),
+  seascape-coverage (pbf, z0-8), versatiles-shortbread (pbf, z0-14),
+  elevation (webp, z0-12) and seascape-dem (webp, z0-18) — into
+  separate side-by-side MBTiles files derived from the configured
+  `outputPath` (suffix inserted before `.mbtiles`). Each source is
+  clamped to its own zoom ceiling at corridor-build time, fetched
+  through one shared throttle/worker/recovery loop, and routed to
+  its own store with per-store metadata (name, format, attribution,
+  vector layers). A 404 on any single tile is a per-tile skip, never a
+  job failure. `MAX_QUEUE_SIZE` raised to 2,000,000 for the combined
+  six-source corridor volume. The web UI progress monitor shows
+  per-source counts; `GET /status` reports `bySource`, per-store
+  `outputPaths` and `dbSizeBytes`.
+- Runtime chart-style mirror: every Open Waters job fetches the
+  published `style.json` verbatim and mirrors its sprite sheets
+  (discovered from the style's `sprite` array form) and font glyph
+  ranges (256 PBFs per stack, discovered from layer `text-font`
+  unions) into the plugin data dir under `mirror/`. Sprite `@2x`
+  variants and missing font ranges are optional (404 = skip, never
+  blocking). Asset fetching rides the same throttle/suspension/retry
+  machinery as tiles and runs concurrently with the tile download —
+  never blocking it (a shared inter-request gate ensures the global
+  request rate never exceeds the configured `throttleMs`). The plugin serves URL-rewritten assets for offline
+  MapLibre rendering: `GET /assets/manifest.json`, `GET
+  /assets/style.json` (sources with cached tiles rewritten to local
+  `/signalk/v1/api/resources/charts/<source>/` URLs, uncached sources
+  and their layers dropped, glyphs/sprites rewritten to plugin asset
+  routes), `GET /assets/sprites/:file`, and `GET
+  /assets/fonts/:fontstack/:range` (with path-traversal and
+  unknown-id guards). `GET /status` reports an `assets` state —
+  `none` (never attempted), `fetching`, `ready`, `partial`, or
+  `failed` — derived from disk.
+- Journal v2: the pending-job journal now persists a `sources` array
+  of `{id, path, maxZoom}` so a restart resumes all six sources with
+  their per-source zoom caps. v1 journals resume seamap-only
+  (untouched, no silent migration).
 - Open Waters vector map support (the `vector.md` blueprint): the
   `Open Waters Seamap` tile provider is back — and now the default —
   sourcing Mapbox Vector Tiles from

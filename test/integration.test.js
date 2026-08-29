@@ -61,7 +61,7 @@ describe("downloader integration (real fetch + real store)", () => {
     const store = new MbTilesStore(dbPath);
     const downloader = createDownloader({
       getStore: () => store,
-      tileServerUrl: `${baseUrl}/seamark/{z}/{x}/{y}.png`,
+      templates: { seamap: `${baseUrl}/seamark/{z}/{x}/{y}.png` },
       userAgent: "IntegrationTest/1.0",
       throttleMs: 1,
       sleepFn: () => Promise.resolve(),
@@ -108,7 +108,7 @@ describe("downloader integration (real fetch + real store)", () => {
     const store = new MbTilesStore(dbPath);
     const downloader = createDownloader({
       getStore: () => store,
-      tileServerUrl: `${baseUrl}/ratelimited/{z}/{x}/{y}.png`,
+      templates: { seamap: `${baseUrl}/ratelimited/{z}/{x}/{y}.png` },
       userAgent: "IntegrationTest/1.0",
       throttleMs: 1,
       sleepFn: () => Promise.resolve(),

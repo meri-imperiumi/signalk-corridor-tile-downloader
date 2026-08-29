@@ -80,13 +80,22 @@ class CtdStatusHeader extends HTMLElement {
       this.jobEl.textContent = jobLabel(status);
       this.routeEl.textContent = status.activeRouteName || "—";
       this.sourceEl.textContent = sourceLabel(status);
-      this.cacheEl.textContent = formatSI(status.dbSizeBytes, "B");
+      this.cacheEl.textContent = formatSI(totalDbSize(status.dbSizeBytes), "B");
       this.cardEl.className = `sk-card ${themeFor(status, online)}`;
     } else if (!online) {
       this.jobEl.textContent = "—";
       this.cardEl.className = "sk-card theme-red";
     }
   }
+}
+
+/** Total on-disk size across every mirrored store. */
+function totalDbSize(dbSizeBytes) {
+  if (typeof dbSizeBytes === "number") return dbSizeBytes;
+  return Object.values(dbSizeBytes ?? {}).reduce(
+    (sum, n) => sum + (Number.isFinite(n) ? n : 0),
+    0,
+  );
 }
 
 /** Source cell label: provider plus its tile format. */

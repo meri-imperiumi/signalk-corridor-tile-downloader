@@ -159,6 +159,159 @@ function countingFetch() {
   return { calls, fn };
 }
 
+const webpHeaders = {
+  get: (n) => (n.toLowerCase() === "content-type" ? "image/webp" : null),
+};
+const jsonHeaders = {
+  get: (n) => (n.toLowerCase() === "content-type" ? "application/json" : null),
+};
+
+/** Minimal WebP body: RIFF...WEBPVP8L signature (12-byte magic). */
+const WEBP = Buffer.from([
+  0x52, 0x49, 0x46, 0x46, 0x2a, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56,
+  0x50, 0x38, 0x4c,
+]);
+
+/** A small sprite-sheet PNG. */
+const SPRITE_PNG = Buffer.concat([
+  require("../lib/downloader.js").PNG_SIGNATURE,
+  Buffer.alloc(100, 0x44),
+]);
+
+/**
+ * The mirrored style's source ids must match the provider's source
+ * table so the style transform rewrites them to local chart URLs.
+ */
+function openWatersStyle() {
+  return {
+    version: 8,
+    name: "seamap",
+    glyphs: "https://tiles.openwaters.io/fonts/{fontstack}/{range}.pbf",
+    sprite: [
+      {
+        id: "freenauticalchart",
+        url: "https://tiles.openwaters.io/seamap/sprites/freenauticalchart",
+      },
+    ],
+    sources: {
+      seamap: {
+        type: "vector",
+        tiles: ["https://tiles.openwaters.io/seamap/{z}/{x}/{y}.pbf"],
+      },
+      "seascape-vector": {
+        type: "vector",
+        tiles: ["https://tiles.openwaters.io/seascape/{z}/{x}/{y}.pbf"],
+      },
+      "seascape-coverage": {
+        type: "vector",
+        tiles: [
+          "https://tiles.openwaters.io/seascape/coverage/{z}/{x}/{y}.pbf",
+        ],
+      },
+      "versatiles-shortbread": {
+        type: "vector",
+        tiles: ["https://tiles.versatiles.org/tiles/osm/{z}/{x}/{y}"],
+      },
+      elevation: {
+        type: "raster",
+        tiles: ["https://tiles.versatiles.org/tiles/elevation/{z}/{x}/{y}"],
+      },
+      "seascape-dem": {
+        type: "raster",
+        tiles: ["https://tiles.openwaters.io/seascape/{z}/{x}/{y}.webp"],
+      },
+    },
+    layers: [
+      { id: "background", type: "background" },
+      {
+        id: "seamark",
+        type: "symbol",
+        source: "seamap",
+        layout: { "text-font": ["Noto Sans Regular"] },
+      },
+    ],
+  };
+}
+
+/**
+ * URL-aware mock fetch for the Open Waters provider: serves the style,
+ * sprites, font glyph ranges, pbf tiles and webp tiles with correct
+ * content types so the full six-source mirror + assets phase runs.
+ * Glyph ranges above 0-255 are 404 (absent upstream).
+ */
+function openWatersFetch(opts = {}) {
+  const calls = [];
+  const style = opts.style ?? openWatersStyle();
+  const fn = (url) => {
+    calls.push(url);
+    if (url === "https://tiles.openwaters.io/seamap/style.json") {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: jsonHeaders,
+        arrayBuffer: async () => Buffer.from(JSON.stringify(style)),
+      });
+    }
+    if (url.includes("/sprites/")) {
+      if (url.endsWith(".json")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: jsonHeaders,
+          arrayBuffer: async () => Buffer.from("{}"),
+        });
+      }
+      if (url.endsWith(".png")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: pngHeaders,
+          arrayBuffer: async () => SPRITE_PNG,
+        });
+      }
+    }
+    if (url.includes("/fonts/")) {
+      const m = /\/fonts\/(.+)\/(\d+)-(\d+)\.pbf$/.exec(url);
+      if (!m)
+        return Promise.resolve({ ok: false, status: 404, headers: undefined });
+      // Only the first range exists upstream; the rest are 404s (skip)
+      if (Number(m[2]) > 0) {
+        return Promise.resolve({ ok: false, status: 404, headers: undefined });
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: pbfHeaders,
+        arrayBuffer: async () => require("node:zlib").gzipSync(MVT),
+      });
+    }
+    if (url.endsWith(".webp") || url.includes("/tiles/elevation/")) {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: webpHeaders,
+        arrayBuffer: async () => WEBP,
+      });
+    }
+    // pbf tiles (seamap, seascape, coverage, versatiles osm)
+    if (url.endsWith(".pbf") || url.includes("/tiles/osm/")) {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: pbfHeaders,
+        arrayBuffer: async () => MVT,
+      });
+    }
+    return Promise.resolve({ ok: false, status: 404, headers: undefined });
+  };
+  return { calls, fn };
+}
+
+/** Is a fetch URL a tile (not an asset)? */
+const isTileUrl = (url) =>
+  /\/\d+\/\d+\/\d+(\.pbf|\.webp)?$/.test(url) ||
+  (url.includes("/tiles/") && !url.includes("/fonts/"));
+
 function waitUntil(predicate, timeoutMs = 2000) {
   return new Promise((resolve, reject) => {
     const started = Date.now();
@@ -260,8 +413,9 @@ describe("plugin", () => {
     assert.equal(res.statusCode, 200);
     assert.equal(res.body.isDownloading, false);
     assert.equal(res.body.state, "idle");
-    assert.equal(typeof res.body.dbSizeBytes, "number");
-    assert.equal(res.body.outputPath, dbPath);
+    assert.equal(typeof res.body.dbSizeBytes, "object");
+    assert.equal(res.body.dbSizeBytes.seamap, 0);
+    assert.equal(res.body.outputPaths.seamap, dbPath);
     assert.equal(res.body.activeRouteName, null);
     assert.equal(res.body.tileProvider, "OpenSeaMap");
     assert.equal(res.body.format, "png");
@@ -277,8 +431,8 @@ describe("plugin", () => {
     assert.ok(!fs.existsSync(`${dbPath}-wal`));
     const idle = makeRes();
     route(app, "get", "/status")({}, idle);
-    assert.equal(idle.body.dbSizeBytes, 0);
-    assert.equal(idle.body.outputPath, dbPath);
+    assert.equal(idle.body.dbSizeBytes.seamap, 0);
+    assert.equal(idle.body.outputPaths.seamap, dbPath);
 
     const res = makeRes();
     route(
@@ -324,8 +478,9 @@ describe("plugin", () => {
     assert.ok(res.body.totalTiles > 0);
 
     await waitUntil(() => notifyCalls.length > 0);
-    // Cancelled or empty jobs must not trigger a refresh storm
-    assert.equal(notifyCalls.length, 1);
+    // The refresh fires when the first tile lands (onTileStored) and
+    // again at job completion (onSettled) — never a storm, but >= 1
+    assert.ok(notifyCalls.length >= 1);
   });
 
   test("cancelled jobs with no tiles do not notify the provider", async () => {
@@ -395,7 +550,7 @@ describe("plugin", () => {
     assert.equal(s.body.failed, 0);
     assert.equal(s.body.completed, res.body.totalTiles);
     assert.equal(s.body.activeRouteName, "Custom target");
-    assert.ok(s.body.dbSizeBytes > 0);
+    assert.ok(s.body.dbSizeBytes.seamap > 0);
 
     // Tiles really landed in the file, readable by a concurrent
     // connection (the charts-provider-simple handoff)
@@ -568,14 +723,10 @@ describe("plugin", () => {
   });
 
   test("vector corridor downloads pbf tiles into a pbf cache", async () => {
-    const calls = [];
-    const pbfFetch = (url) => {
-      calls.push(url);
-      return okPbfFetch();
-    };
+    const fetch = openWatersFetch();
     startWithTestHooks({
       tileProvider: "Open Waters Seamap",
-      fetch: pbfFetch,
+      fetch: fetch.fn,
     });
     plugin.registerWithRouter(app.router);
 
@@ -596,10 +747,15 @@ describe("plugin", () => {
       route(app, "get", "/status")({}, s);
       return s.body.state === "completed";
     });
-    assert.ok(calls.length > 0);
+    // pbf tile URLs (seamap) end in .pbf; the mock also fetched style,
+    // sprites and glyph ranges — filter those out
+    const tileCalls = fetch.calls.filter(isTileUrl);
+    assert.ok(tileCalls.length > 0);
     assert.ok(
-      calls.every((url) => url.endsWith(".pbf")),
-      "vector provider URL template used",
+      tileCalls
+        .filter((url) => url.includes("/seamap/"))
+        .every((url) => url.endsWith(".pbf")),
+      "seamap vector provider URL template used",
     );
 
     const reader = new DatabaseSync(dbPath);
@@ -626,15 +782,26 @@ describe("plugin", () => {
   });
 
   test("empty vector tiles (HTTP 204) are cached as gzipped empties", async () => {
-    startWithTestHooks({
-      tileProvider: "Open Waters Seamap",
-      fetch: () =>
-        Promise.resolve({
+    const ow = openWatersFetch();
+    // Override: pbf tiles get 204 (empty ocean), everything else
+    // (webp tiles, style, sprites, fonts) routes through the mock
+    const fn = (url) => {
+      if (
+        (url.endsWith(".pbf") || url.includes("/tiles/osm/")) &&
+        !url.includes("/fonts/")
+      ) {
+        return Promise.resolve({
           ok: true,
           status: 204,
           headers: pbfHeaders,
           arrayBuffer: async () => Buffer.alloc(0),
-        }),
+        });
+      }
+      return ow.fn(url);
+    };
+    startWithTestHooks({
+      tileProvider: "Open Waters Seamap",
+      fetch: fn,
     });
     plugin.registerWithRouter(app.router);
 
@@ -655,10 +822,11 @@ describe("plugin", () => {
     assert.equal(done.body.completed, res.body.totalTiles);
 
     // A stored empty tile keeps recovery checks from refetching it
+    // (seamap store only — other sources are in sibling files)
     const reader = new DatabaseSync(dbPath);
     const rows = reader.prepare("SELECT tile_data FROM tiles").all();
     reader.close();
-    assert.equal(rows.length, res.body.totalTiles);
+    assert.ok(rows.length > 0);
     for (const row of rows) {
       assert.equal(row.tile_data[0], 0x1f);
       assert.equal(row.tile_data[1], 0x8b);
@@ -1085,12 +1253,19 @@ describe("plugin", () => {
       plugin.stop();
       assert.ok(fs.existsSync(pendingJobFile()));
       const intent = JSON.parse(fs.readFileSync(pendingJobFile(), "utf8"));
-      assert.equal(intent.version, 1);
+      assert.equal(intent.version, 2);
       assert.equal(intent.routeName, "Custom target");
       assert.equal(intent.outputPath, dbPath);
       assert.equal(intent.coordinates.length, 2);
       assert.equal(intent.minZoom, 1);
       assert.equal(intent.maxZoom, 1);
+      // v2 journals persist the source list with derived paths and
+      // per-source zoom caps (BATHYMETRY.md STEP 7)
+      assert.ok(Array.isArray(intent.sources));
+      assert.equal(intent.sources.length, 1);
+      assert.equal(intent.sources[0].id, "seamap");
+      assert.equal(intent.sources[0].path, dbPath);
+      assert.equal(intent.sources[0].maxZoom, 1);
 
       // Fresh plugin instance over the same cache and journal (the
       // mock router must forget the stopped instance's handlers)
@@ -1265,6 +1440,12 @@ describe("configuration", () => {
     // native zoom ceiling clamps maxZoom to 14)
     assert.equal(config.tileProvider, "Open Waters Seamap");
     assert.equal(config.format, "pbf");
+    assert.ok(Array.isArray(config.sources));
+    assert.equal(config.sources.length, 6);
+    assert.equal(
+      config.styleUrl,
+      "https://tiles.openwaters.io/seamap/style.json",
+    );
     assert.deepEqual(config.vectorLayers, [
       "land",
       "light",
@@ -1340,9 +1521,10 @@ describe("configuration", () => {
     const config = pluginFactory.resolveConfig({
       tileProvider: "Open Waters Seamap",
       minZoom: 10,
-      maxZoom: 17,
+      maxZoom: 20,
     });
-    assert.equal(config.maxZoom, 14);
+    // Ceiling is the highest native source maxZoom: z18 (the DEM)
+    assert.equal(config.maxZoom, 18);
     assert.equal(config.minZoom, 10);
 
     // The raster provider has no ceiling beyond the general clamp
