@@ -1113,6 +1113,26 @@ describe("vector tiles (Open Waters Seamap)", () => {
     }
   });
 
+  test("accepts versatiles' non-standard Content-Type missing the application/ prefix", async () => {
+    // tiles.versatiles.org returns `Content-Type: vnd.mapbox-vector-tile`
+    // (no `application/` tree prefix) for its pbf tiles. Without
+    // normalization every such tile is rejected as a wrong-Content-Type
+    // rate limit and penalizes the whole host — blocking the sibling
+    // elevation source too. The body is a valid (tiny) raw MVT.
+    const store = fakeStore();
+    const { downloader, calls, sleeps } = makeDownloader(
+      store,
+      [bodyResponse("vnd.mapbox-vector-tile", MVT)],
+      { format: "pbf" },
+    );
+    downloader.start([{ z: 8, x: 1, y: 2, yTms: 3 }]);
+    await jobSettled(downloader);
+    assert.equal(downloader.status().completed, 1);
+    assert.equal(calls.length, 1);
+    assert.deepEqual(sleeps, []);
+    assert.equal(store.inserts.length, 1);
+  });
+
   test("a protobuf body mislabeled image/png is rejected", async () => {
     const store = fakeStore();
     const { downloader } = makeDownloader(

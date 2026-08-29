@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- versatiles-shortbread and elevation now download: tiles.versatiles.org
+  returns `Content-Type: vnd.mapbox-vector-tile` for its pbf tiles —
+  the `application/` tree prefix is missing. The validator rejected
+  every such tile as a wrong-Content-Type rate limit and escalated a
+  5-minute penalty on the host, which blocked the sibling elevation
+  source too (same host). Media types are now normalized: a bare token
+  without a slash is treated as the `application/` vendor subtype it
+  was meant to be, so `vnd.mapbox-vector-tile` is accepted as
+  `application/vnd.mapbox-vector-tile`.
 - Resume no longer hangs the server: when an in-flight download is
   resumed at startup and the next tile fetch triggers a per-host
   rate-limit penalty (429/503, or a wrong Content-Type such as an
