@@ -9,6 +9,7 @@ const {
   MbTilesStore,
   CHECKPOINT_INTERVAL,
   isIoError,
+  extentFromTilesFile,
 } = require("../lib/mbtiles.js");
 
 let dir;
@@ -303,5 +304,48 @@ describe("MbTilesStore WAL sidecar self-healing", () => {
     assert.equal(isIoError(sqliteErr(6)), false); // SQLITE_LOCKED
     assert.equal(isIoError(new Error("disk I/O error")), false);
     assert.equal(isIoError(null), false);
+  });
+});
+
+describe("MbTilesStore extent derivation", () => {
+  let dir;
+  let dbPath;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "mbtiles-extent-"));
+    dbPath = path.join(dir, "passage_cache.mbtiles");
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("derives the envelope of stored tiles (TMS rows, all zooms)", () => {
+    const store = new MbTilesStore(dbPath);
+    assert.equal(store.extentFromTiles(), null, "empty store → null");
+    assert.equal(extentFromTilesFile(dbPath), null, "file variant → null");
+
+    // z1 x0 y0 (TMS bottom-left): lon [-180, 0], lat [-85.05, 0]
+    store.insertTile(1, 0, 0, Buffer.from([1]));
+    // z2 x2 y1 (TMS): lon [0, 90], lat [-66.51, 0]
+    store.insertTile(2, 2, 1, Buffer.from([2]));
+
+    const extent = store.extentFromTiles();
+    assert.ok(extent, "derived extent");
+    assert.ok(Math.abs(extent.bounds[0] - -180) < 1e-4, "west -180");
+    assert.ok(Math.abs(extent.bounds[1] - -85.0511) < 1e-3, "south -85.05");
+    assert.ok(Math.abs(extent.bounds[2] - 90) < 1e-4, "east 90");
+    assert.ok(Math.abs(extent.bounds[3] - 0) < 1e-4, "north 0");
+    assert.equal(extent.minzoom, 1);
+    assert.equal(extent.maxzoom, 2);
+
+    // The read-only file variant agrees
+    store.close();
+    const fromFile = extentFromTilesFile(dbPath);
+    assert.deepEqual(fromFile, extent);
+  });
+
+  test("file variant is quiet on missing files", () => {
+    assert.equal(extentFromTilesFile(path.join(dir, "nope.mbtiles")), null);
   });
 });

@@ -83,11 +83,13 @@ function openWatersStyle() {
         tiles: ["https://tiles.versatiles.org/tiles/osm/{z}/{x}/{y}"],
       },
       elevation: {
-        type: "raster",
+        type: "raster-dem",
+        encoding: "terrarium",
         tiles: ["https://tiles.versatiles.org/tiles/elevation/{z}/{x}/{y}"],
       },
       "seascape-dem": {
-        type: "raster",
+        type: "raster-dem",
+        encoding: "terrarium",
         tiles: ["https://tiles.openwaters.io/seascape/{z}/{x}/{y}.webp"],
       },
     },
@@ -100,11 +102,43 @@ function openWatersStyle() {
         layout: { "text-font": ["Noto Sans Regular"] },
       },
       {
+        // Upstream pattern: icon-image built from `image` expressions
+        // with a coalesce fallback chain — an operator ol-mapbox-style
+        // does not implement.
+        id: "lights",
+        type: "symbol",
+        source: "seamap",
+        layout: {
+          "icon-image": [
+            "coalesce",
+            [
+              "image",
+              ["concat", "freenauticalchart:light/", ["get", "light_color"]],
+            ],
+            ["image", ["concat", "freenauticalchart:light/white"]],
+          ],
+          "icon-overlap": "always",
+        },
+      },
+      {
         id: "depth",
         type: "symbol",
         source: "seascape-vector",
         layout: { "text-font": ["Noto Sans Italic"] },
       },
+      {
+        // First layer of seascape-dem upstream: a MapLibre-only type
+        // that crashes ol-mapbox-style's apply() outright.
+        id: "depth-shading",
+        type: "color-relief",
+        source: "seascape-dem",
+      },
+      {
+        id: "depth-hillshade",
+        type: "hillshade",
+        source: "seascape-dem",
+      },
+      { id: "hillshade", type: "hillshade", source: "elevation" },
     ],
   };
 }
@@ -217,6 +251,14 @@ function createMockApp() {
     dataDir: null,
     getDataDirPath() {
       return this.dataDir;
+    },
+    resourceProviders: [],
+    registerResourceProvider(provider) {
+      this.resourceProviders.push(provider);
+    },
+    messages: [],
+    handleMessage(source, delta, version) {
+      this.messages.push({ source, delta, version });
     },
   };
 }
@@ -913,6 +955,15 @@ describe("BATHYMETRY 8: style transform", () => {
         `${id} tiles local`,
       );
       assert.equal(source.url, undefined, `${id} url dropped`);
+      // True cached coverage advertised so clients stop requesting
+      // (and 404ing on) viewport tiles outside it. `minzoom` is
+      // deliberately absent (see transformStyle).
+      assert.ok(
+        Array.isArray(source.bounds) && source.bounds.length === 4,
+        `${id} carries derived bounds`,
+      );
+      assert.equal(source.minzoom, undefined, `${id} no minzoom`);
+      assert.equal(typeof source.maxzoom, "number", `${id} maxzoom`);
     }
 
     // Glyphs and sprites rewritten to local plugin routes
@@ -976,9 +1027,139 @@ describe("BATHYMETRY 8: style transform", () => {
     // Only seamap source survives
     assert.deepEqual(Object.keys(style.sources), ["seamap"]);
     // Layers whose source was dropped are gone; background stays
-    const layerSources = style.layers.map((l) => l.source).filter(Boolean);
+    const layerSources = [
+      ...new Set(style.layers.map((l) => l.source).filter(Boolean)),
+    ];
     assert.deepEqual(layerSources, ["seamap"]);
     assert.ok(style.layers.some((l) => l.id === "background"));
+  });
+
+  test("OL variant drops unrenderable layers and orphaned sources; MapLibre style keeps them", async () => {
+    // seascape-dem referenced ONLY by its color-relief layer: after the
+    // type filter no layer references it, so the source must go too.
+    const style = openWatersStyle();
+    style.layers = style.layers.filter(
+      (layer) => layer.id !== "depth-hillshade",
+    );
+    style.layers.push({ id: "traffic", type: "heatmap", source: "seamap" });
+    const ow = openWatersFetch({ style });
+    plugin.start({
+      outputPath: dbPath,
+      minZoom: 1,
+      maxZoom: 1,
+      strategicMarginNM: 0.1,
+      tacticalMarginNM: 0.1,
+      approachRadiusNM: 0.1,
+      throttleMs: 0,
+      fetch: ow.fn,
+      sleep: () => Promise.resolve(),
+      tileProvider: "Open Waters Seamap",
+    });
+    plugin.registerWithRouter(app.router);
+
+    route(
+      app,
+      "post",
+      "/fetch-target",
+    )({ body: { coordinates: [{ lat: 0, lon: 0 }] } }, makeRes());
+    await waitUntil(() => {
+      const s = makeRes();
+      route(app, "get", "/status")({}, s);
+      return s.body.state === "completed";
+    });
+
+    const req = { headers: { host: "boat.local" } };
+
+    // The MapLibre style stays faithful: color-relief and heatmap kept
+    const maplibreRes = makeRes();
+    route(app, "get", "/assets/style.json")(req, maplibreRes);
+    assert.equal(maplibreRes.statusCode, 200);
+    assert.ok(
+      maplibreRes.body.layers.some((l) => l.id === "depth-shading"),
+      "MapLibre style keeps color-relief",
+    );
+    assert.ok(
+      maplibreRes.body.layers.some((l) => l.id === "traffic"),
+      "MapLibre style keeps heatmap",
+    );
+    assert.ok(
+      maplibreRes.body.sources["seascape-dem"],
+      "MapLibre style keeps the DEM source",
+    );
+    const maplibreLights = maplibreRes.body.layers.find(
+      (l) => l.id === "lights",
+    );
+    assert.deepEqual(
+      maplibreLights.layout["icon-image"],
+      [
+        "coalesce",
+        [
+          "image",
+          ["concat", "freenauticalchart:light/", ["get", "light_color"]],
+        ],
+        ["image", ["concat", "freenauticalchart:light/white"]],
+      ],
+      "MapLibre style keeps image expressions",
+    );
+    assert.equal(
+      maplibreLights.layout["icon-overlap"],
+      "always",
+      "MapLibre style keeps icon-overlap",
+    );
+
+    // The OL variant drops them and the orphaned DEM source
+    const olRes = makeRes();
+    route(app, "get", "/assets/style-ol.json")(req, olRes);
+    assert.equal(olRes.statusCode, 200);
+    const olStyle = olRes.body;
+    assert.equal(
+      olStyle.layers.some(
+        (l) => l.type === "color-relief" || l.type === "heatmap",
+      ),
+      false,
+      "OL variant drops unrenderable layer types",
+    );
+    assert.ok(
+      olStyle.layers.some((l) => l.id === "seamark"),
+      "OL variant keeps renderable layers",
+    );
+    assert.ok(
+      olStyle.layers.some((l) => l.id === "hillshade"),
+      "OL variant keeps hillshade (renderable from raster-dem)",
+    );
+    assert.equal(
+      olStyle.sources["seascape-dem"],
+      undefined,
+      "orphaned DEM source pruned",
+    );
+    assert.ok(
+      olStyle.sources.seamap.tiles[0].includes(
+        "boat.local/signalk/v1/api/resources/charts/",
+      ),
+      "OL variant still rewrites tile URLs",
+    );
+
+    // image expressions unwrapped; icon-overlap mapped
+    const olLights = olStyle.layers.find((l) => l.id === "lights");
+    assert.deepEqual(
+      olLights.layout["icon-image"],
+      [
+        "coalesce",
+        ["concat", "freenauticalchart:light/", ["get", "light_color"]],
+        ["concat", "freenauticalchart:light/white"],
+      ],
+      "OL variant unwraps image expressions",
+    );
+    assert.equal(
+      olLights.layout["icon-overlap"],
+      undefined,
+      "icon-overlap dropped",
+    );
+    assert.equal(
+      olLights.layout["icon-allow-overlap"],
+      true,
+      "icon-overlap always mapped to icon-allow-overlap",
+    );
   });
 });
 
@@ -1044,6 +1225,8 @@ describe("BATHYMETRY 9: asset routes", () => {
     )({ headers: { host: "boat.local" } }, res);
     assert.equal(res.statusCode, 200);
     assert.ok(res.body.style, "style URL present");
+    assert.ok(res.body.styleOl, "OL style URL present");
+    assert.ok(res.body.styleOl.endsWith("/assets/style-ol.json"));
     assert.ok(res.body.sprites.freenauticalchart, "sprite entry");
     assert.ok(
       res.body.glyphs.includes("{fontstack}/{range}.pbf"),
@@ -1349,5 +1532,203 @@ describe("BATHYMETRY 11: failures", () => {
     const styleRes = makeRes();
     route(app, "get", "/assets/style.json")({}, styleRes);
     assert.equal(styleRes.statusCode, 404);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TEST 10: Charts resource provider
+// ---------------------------------------------------------------------------
+
+describe("RESOURCE PROVIDER: offline style chart", () => {
+  let app, plugin, dir, dbPath;
+
+  beforeEach(() => {
+    app = createMockApp();
+    plugin = pluginFactory(app);
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "resprov-"));
+    dbPath = path.join(dir, "passage_cache.mbtiles");
+    app.dataDir = path.join(dir, "plugin-data");
+  });
+
+  afterEach(() => {
+    plugin.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  function startWith(overrides = {}) {
+    plugin.start({
+      outputPath: dbPath,
+      minZoom: 1,
+      maxZoom: 1,
+      strategicMarginNM: 0.1,
+      tacticalMarginNM: 0.1,
+      approachRadiusNM: 0.1,
+      throttleMs: 0,
+      fetch: () => Promise.resolve({ ok: false, status: 404 }),
+      sleep: () => Promise.resolve(),
+      tileProvider: "Open Waters Seamap",
+      ...overrides,
+    });
+    plugin.registerWithRouter(app.router);
+  }
+
+  async function runCompletedJob() {
+    const ow = openWatersFetch();
+    startWith({ fetch: ow.fn });
+    route(
+      app,
+      "post",
+      "/fetch-target",
+    )({ body: { coordinates: [{ lat: 0, lon: 0 }] } }, makeRes());
+    await waitUntil(() => {
+      const s = makeRes();
+      route(app, "get", "/status")({}, s);
+      return s.body.state === "completed";
+    });
+  }
+
+  async function runJobAt(coordinates) {
+    const ow = openWatersFetch();
+    startWith({ fetch: ow.fn });
+    const res = makeRes();
+    route(app, "post", "/fetch-target")({ body: { coordinates } }, res);
+    if (res.statusCode !== 200) throw new Error(res.body.message);
+    await waitUntil(() => {
+      const s = makeRes();
+      route(app, "get", "/status")({}, s);
+      return s.body.state === "completed";
+    });
+  }
+
+  test("registers a read-only charts provider after a mirror job", async () => {
+    await runCompletedJob();
+
+    assert.equal(app.resourceProviders.length, 1);
+    const provider = app.resourceProviders[0];
+    assert.equal(provider.type, "charts");
+
+    const list = await provider.methods.listResources({});
+    const ids = Object.keys(list);
+    assert.deepEqual(ids, ["openwaters-corridor"]);
+    const chart = list["openwaters-corridor"];
+    assert.equal(chart.type, "mapstyleJSON");
+    assert.ok(
+      chart.url.endsWith(
+        "/plugins/signalk-corridor-tile-downloader/assets/style-ol.json",
+      ),
+      "chart URL points at the OL style variant",
+    );
+    assert.equal(chart.url.startsWith("/"), true, "URL is root-relative");
+    assert.ok(
+      Array.isArray(chart.bounds) &&
+        chart.bounds.length === 4 &&
+        chart.bounds.every(Number.isFinite),
+      "bounds aggregated from cached stores",
+    );
+    assert.ok(
+      typeof chart.minzoom === "number" && typeof chart.maxzoom === "number",
+      "zoom range present",
+    );
+
+    const single = await provider.methods.getResource("openwaters-corridor");
+    assert.equal(single.type, "mapstyleJSON");
+    await assert.rejects(
+      () => provider.methods.getResource("unknown-chart"),
+      /Chart not found/,
+    );
+    await assert.rejects(
+      () => provider.methods.setResource("x", {}),
+      /Not implemented/,
+    );
+    await assert.rejects(
+      () => provider.methods.deleteResource("x"),
+      /Not implemented/,
+    );
+  });
+
+  test("lists nothing before style and tiles exist", async () => {
+    startWith();
+    assert.equal(app.resourceProviders.length, 1);
+    const list = await app.resourceProviders[0].methods.listResources({});
+    assert.deepEqual(list, {});
+    await assert.rejects(
+      () => app.resourceProviders[0].methods.getResource("openwaters-corridor"),
+      /Chart not available/,
+    );
+  });
+
+  test("no provider registered for non-mirror configs", () => {
+    startWith({ tileProvider: "OpenSeaMap" });
+    assert.equal(app.resourceProviders.length, 0);
+  });
+
+  test("chart bounds derive from tiles, repairing shrunken metadata", async () => {
+    await runJobAt([
+      { lat: 0, lon: -170 },
+      { lat: 0, lon: -168 },
+    ]);
+
+    // Simulate the historical bug: a later, smaller corridor overwrote
+    // the metadata bounds while the western tiles stayed in the store.
+    const store = new MbTilesStore(dbPath);
+    store.setBounds([19, -1, 21, 1]);
+    store.close();
+
+    const provider = app.resourceProviders[0];
+    const list = await provider.methods.listResources({});
+    const chart = list["openwaters-corridor"];
+    assert.ok(chart.bounds[0] < -166, "west bound derived from tiles");
+    assert.ok(chart.bounds[2] > 18, "east bound keeps shrunken metadata too");
+  });
+
+  test("a second corridor never shrinks the advertised coverage", async () => {
+    await runJobAt([
+      { lat: 0, lon: -170 },
+      { lat: 0, lon: -168 },
+    ]);
+    await runJobAt([
+      { lat: 0, lon: 20 },
+      { lat: 0, lon: 22 },
+    ]);
+
+    // Store metadata unions across jobs
+    const { DatabaseSync } = require("node:sqlite");
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    const meta = Object.fromEntries(
+      db
+        .prepare("SELECT name, value FROM metadata")
+        .all()
+        .map((r) => [r.name, r.value]),
+    );
+    db.close();
+    const [w, , e] = meta.bounds.split(",").map(Number);
+    assert.ok(w < -166, "metadata keeps western coverage");
+    assert.ok(e > 18, "metadata includes eastern corridor");
+
+    // The advertised chart resource covers both corridors
+    const provider = app.resourceProviders[0];
+    const list = await provider.methods.listResources({});
+    const chart = list["openwaters-corridor"];
+    assert.ok(chart.bounds[0] < -166, "resource west covers first corridor");
+    assert.ok(chart.bounds[2] > 18, "resource east covers second corridor");
+  });
+
+  test("job completion emits a resources.charts delta", async () => {
+    await runCompletedJob();
+
+    const deltas = app.messages
+      .map((m) => m.delta?.updates?.[0]?.values?.[0])
+      .filter((v) => v?.path === "resources.charts.openwaters-corridor");
+    assert.ok(deltas.length >= 1, "chart resource delta emitted");
+    assert.equal(deltas.at(-1).value.type, "mapstyleJSON");
+    assert.equal(
+      deltas.at(-1).value.url,
+      "/plugins/signalk-corridor-tile-downloader/assets/style-ol.json",
+    );
+    assert.equal(
+      app.messages.every((m) => m.version === 2),
+      true,
+      "deltas emitted as v2 (no full model cache)",
+    );
   });
 });

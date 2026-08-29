@@ -5,6 +5,67 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- True cache extents everywhere: coverage is now derived from the
+  tiles tables (`MbTilesStore.extentFromTiles()` and a read-only
+  `extentFromTilesFile()` probe) instead of trusting the `bounds`
+  metadata row. That row only ever described the LATEST job's corridor
+  while tiles accumulate across jobs — after a smaller follow-up
+  corridor the advertised bounds shrank below the data on disk, and
+  Freeboard SK (which clips chart rendering to the resource bounds)
+  blanked every tile of previous corridors still in the cache. Now:
+  job-start metadata writes the union of existing rows + tiles on disk
+  + the new corridor, the advertised `openwaters-corridor` chart
+  resource derives its bounds/zooms from the tiles (repairing caches
+  written by older versions without a re-run), and every source in the
+  rewritten styles (`style.json` and `style-ol.json`) carries its true
+  `bounds` and `maxzoom` (but NOT `minzoom`: below the cached minimum
+  no tiles exist and none can be synthesized — overzoom only goes up
+  from an ancestor — so a minzoom merely hides the layer around that
+  boundary in both MapLibre and ol-mapbox-style). The source bounds
+  also stop the 404 storm: without them clients requested tiles
+  viewport-wide and every tile outside the corridor 404'd (raster DEM
+  stores get none of the pbf-style overzoom synthesis the provider
+  applies to missing vector tiles); with them, OpenLayers and MapLibre
+  constrain requests to covered tiles and overzoom cached parents
+  beyond `maxzoom`.
+
+- `GET /assets/style-ol.json`: an OpenLayers-compatible variant of the
+  mirrored Open Waters style for Freeboard SK (ol-mapbox-style). Same
+  URL rewriting as `/assets/style.json`, minus layers OL cannot render:
+  MapLibre's `color-relief` depth shading (upstream the FIRST layer of
+  the `seascape-dem` source) matches no ol-mapbox-style branch and
+  makes `apply()` reject — blanking the ENTIRE chart, not just the one
+  layer — and `heatmap` renders nothing. Sources left without any
+  layer after the filter are pruned so clients never fetch undrawable
+  tiles. `icon-image` fallback chains have their MapLibre `image`
+  expressions unwrapped to the inner name expression: ol-mapbox-style
+  has no `image` operator and fails the whole expression parse, so
+  the `lights`, `buoys` and `topmarks` layers styled every feature to
+  nothing (labels — separate layers — still rendered, hiding the
+  failure). MapLibre's `icon-overlap: "always"` (15 layers, the
+  safety symbology) is mapped to the `icon-allow-overlap` spelling
+  ol-mapbox-style reads, so lights and rocks are not decluttered
+  away. The manifest gained a matching `styleOl` URL beside `style`;
+  the MapLibre style stays verbatim.
+- Signal K charts resource provider: the plugin now registers as a
+  read-only `charts` resource provider advertising a single
+  `mapstyleJSON` chart (`openwaters-corridor`) whose URL is the OL
+  style variant, with bounds and zooms aggregated from every cached
+  store. Freeboard SK discovers and renders the offline corridor
+  styled with zero manual setup — the server merges listings from
+  multiple chart providers, so the six per-file charts of
+  signalk-charts-provider-simple keep working alongside. A
+  `resources.charts.openwaters-corridor` delta (Signal K v2) is
+  emitted whenever the entry appears, changes, or disappears, so
+  connected clients update without polling. Writes and deletes are
+  rejected: the entry is derived from mirror state. No provider is
+  registered for non-mirror (OpenSeaMap/custom) configs or servers
+  without resource-provider support.
+
 ## [0.2.0] - 2026-08-28
 
 ### Fixed

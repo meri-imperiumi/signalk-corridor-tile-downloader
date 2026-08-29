@@ -17,6 +17,13 @@
  * This plugin is strictly a data producer. Passage jobs are journaled
  * and resume automatically after restarts.
  *
+ * It also registers as a read-only Signal K `charts` resource provider:
+ * once the mirror can serve a style and at least one source has tiles,
+ * a single `mapstyleJSON` chart resource (id `openwaters-corridor`)
+ * points Freeboard SK at the OL-compatible style variant — clients
+ * discover and render the offline chart with zero manual setup. A
+ * `resources.charts` delta is emitted whenever that entry changes.
+ *
  * REST API (mounted at /plugins/signalk-corridor-tile-downloader):
  *   GET  /status                       queue + cache + mirror snapshot
  *   POST /fetch-active-route           corridor for navigation.course.activeRoute
@@ -25,6 +32,7 @@
  *   POST /vacuum                       VACUUM every mbtiles database
  *   GET  /assets/manifest.json         mirror discovery contract
  *   GET  /assets/style.json            URL-rewritten copy of the mirrored style
+ *   GET  /assets/style-ol.json         OpenLayers variant (unrenderable layers dropped)
  *   GET  /assets/sprites/:file         mirrored sprite sheets
  *   GET  /assets/fonts/:fontstack/:range  mirrored glyph ranges
  *
@@ -37,14 +45,14 @@
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { DatabaseSync } = require("node:sqlite");
 const {
   bubbleTiles,
   corridorTiles,
   distanceNM,
   isValidCoordinate,
 } = require("./lib/geometry.js");
-const { MbTilesStore, nodeSupportsSqlite } = require("./lib/mbtiles.js");
+const { MbTilesStore, nodeSupportsSqlite, extentFromTilesFile } =
+  require("./lib/mbtiles.js");
 const {
   createDownloader,
   DEFAULT_SOURCE,
@@ -259,6 +267,15 @@ const CHARTS_PROVIDER_ID = "signalk-charts-provider-simple";
  */
 const CHARTS_REFRESH_GLOBAL = "__signalk_chartsProviderRefresh";
 
+/**
+ * Id of the chart resource this plugin advertises through the Signal K
+ * resources API: a `mapstyleJSON` chart whose URL is the OL-compatible
+ * style variant, so Freeboard SK renders the offline mirror styled.
+ * Multiple chart providers coexist (the server merges their listings),
+ * so this never collides with charts-provider-simple's per-file charts.
+ */
+const STYLE_CHART_ID = "openwaters-corridor";
+
 /** Glyph range geometry of the Open Waters font endpoint: files cover
  * 256 codepoints each, `{n}-{n+255}` for n = 0..65280. */
 const GLYPH_RANGE_STEP = 256;
@@ -267,6 +284,53 @@ const GLYPH_MAX_CODEPOINT = 65535;
 /** Upstream glyph endpoint (fontstack URL-encoded, BATHYMETRY.md). */
 const FONT_URL_TEMPLATE =
   "https://tiles.openwaters.io/fonts/{fontstack}/{range}.pbf";
+
+/**
+ * Layer types ol-mapbox-style — Freeboard SK's style renderer — can
+ * draw: background, the vector geometry types, raster, and hillshade
+ * from raster-dem sources. MapLibre-only additions are absent: a
+ * `heatmap` layer is logged and skipped by ol-mapbox-style, and a
+ * `color-relief` layer (Open Waters' `depth-shading`) matches no
+ * branch at all — when it is the FIRST layer of its source, as
+ * upstream, `apply()` dereferences an undefined layer and rejects,
+ * blanking the entire chart instead of just the one layer. The OL
+ * style variant keeps only this set.
+ */
+const OL_RENDERABLE_LAYER_TYPES = new Set([
+  "background",
+  "fill",
+  "fill-extrusion",
+  "line",
+  "symbol",
+  "circle",
+  "raster",
+  "hillshade",
+]);
+
+/**
+ * Rewrites MapLibre's `image` expression (used in `icon-image`
+ * fallback chains: `["image", name]` resolves to the sprite icon,
+ * null when absent so `coalesce` can fall through) to its inner name
+ * expression. ol-mapbox-style has no `image` operator — parsing the
+ * expression fails, and with it every feature of the layer styles to
+ * nothing: Open Waters' `lights`, `buoys` and `topmarks` layers would
+ * render blank while their labels (separate layers) stay visible.
+ *
+ * Degradation vs MapLibre: a name the sprite lacks no longer falls
+ * through to later `coalesce` branches — the icon is just skipped
+ * (ol-mapbox-style draws nothing for unknown names). The sprite's
+ * color variants cover the first branch in practice.
+ *
+ * @param {unknown} value - Style expression node
+ * @returns {unknown}
+ */
+function unwrapImageExpressions(value) {
+  if (!Array.isArray(value)) return value;
+  if (value[0] === "image" && value.length === 2) {
+    return unwrapImageExpressions(value[1]);
+  }
+  return value.map(unwrapImageExpressions);
+}
 
 /**
  * Expands a leading `~/` to the user's home directory.
@@ -278,6 +342,39 @@ function expandHome(p) {
   if (p === "~") return os.homedir();
   if (p.startsWith("~/")) return path.join(os.homedir(), p.slice(2));
   return p;
+}
+
+/**
+ * Envelope union of two `[west, south, east, north]` boxes (null
+ * tolerant). Coverage never shrinks: tiles accumulate across jobs, so
+ * every advertised extent is the union of everything seen so far.
+ *
+ * @param {number[]|null} a
+ * @param {number[]|null} b
+ * @returns {number[]|null}
+ */
+function unionBounds(a, b) {
+  if (a == null) return b == null ? null : [...b];
+  if (b == null) return [...a];
+  return [
+    Math.min(a[0], b[0]),
+    Math.min(a[1], b[1]),
+    Math.max(a[2], b[2]),
+    Math.max(a[3], b[3]),
+  ];
+}
+
+/**
+ * Parses a `bounds` metadata row ("west,south,east,north"). Null when
+ * absent or malformed.
+ *
+ * @param {string|null|undefined} value
+ * @returns {number[]|null}
+ */
+function parseBoundsMetadata(value) {
+  if (typeof value !== "string") return null;
+  const parts = value.split(",").map(Number);
+  return parts.length === 4 && parts.every(Number.isFinite) ? parts : null;
 }
 
 /**
@@ -649,6 +746,9 @@ module.exports = (app) => {
           if (stats.completed > 0) {
             notifyChartsProvider();
           }
+          // The advertised chart resource may have appeared or grown:
+          // push it to subscribed clients (quiet when unchanged).
+          emitStyleChartDelta();
           // A cancelled asset phase leaves "fetching" behind: fall
           // back to deriving the state from disk.
           if (assetsStatus?.state === "fetching") {
@@ -660,6 +760,10 @@ module.exports = (app) => {
       // Reconcile sidecars wedged by an earlier provider housekeeping
       // strike before any reader (or resumed job) touches the caches.
       sweepStaleSidecars();
+
+      // Serve the offline style as a chart resource (no-op for
+      // non-mirror configs and older servers).
+      registerChartsResourceProvider();
 
       subscribeToDeltas();
 
@@ -841,27 +945,6 @@ module.exports = (app) => {
           `${PLUGIN_ID}: cannot reconcile stale WAL sidecars at ${source.path}: ${err.message}`,
         );
       }
-    }
-  }
-
-  /**
-   * Does the store file hold at least one tile? Read-only probe used
-   * by the style transform (a source is only rewritten to local URLs
-   * once it actually has content).
-   *
-   * @param {string} filePath
-   * @returns {boolean}
-   */
-  function storeFileHasTiles(filePath) {
-    try {
-      const db = new DatabaseSync(filePath, { readOnly: true });
-      try {
-        return db.prepare("SELECT 1 AS hit FROM tiles LIMIT 1").get() != null;
-      } finally {
-        db.close();
-      }
-    } catch {
-      return false;
     }
   }
 
@@ -1227,6 +1310,144 @@ module.exports = (app) => {
     } catch (err) {
       app.error(
         `${PLUGIN_ID}: cannot store mirrored asset ${asset.url}: ${err.message}`,
+      );
+    }
+  }
+
+  /**
+   * The chart resource advertising the offline style through the
+   * Signal K resources API: a single `mapstyleJSON` entry pointing at
+   * the OL-compatible style variant, with bounds and zooms aggregated
+   * from every cached store so clients (Freeboard SK) frame and layer
+   * it like any other chart. Null while the mirror cannot serve a
+   * style or no source has tiles yet (the style would render an empty
+   * background over the base map).
+   *
+   * The URL is root-relative: the Signal K server serves it on every
+   * host the plugin routes answer on, and clients resolve it against
+   * their own connection host.
+   *
+   * @returns {object|null}
+   */
+  function styleChartResource() {
+    if (!mirrorEnabled()) return null;
+    if (readMirrorStyle() == null) return null;
+    // Derived from the tiles tables — the metadata `bounds` row only
+    // ever describes the latest job's corridor while tiles accumulate
+    // across jobs, so a fresh smaller corridor must not un-advertise
+    // older coverage (Freeboard clips charts to these bounds).
+    const cached = activeSourceConfigs()
+      .map((source) => ({ source, extent: extentFromTilesFile(source.path) }))
+      .filter((entry) => entry.extent != null);
+    if (cached.length === 0) return null;
+
+    let bounds = null;
+    let minzoom = Number.POSITIVE_INFINITY;
+    let maxzoom = Number.NEGATIVE_INFINITY;
+    for (const { extent } of cached) {
+      bounds = unionBounds(bounds, extent.bounds);
+      minzoom = Math.min(minzoom, extent.minzoom);
+      maxzoom = Math.max(maxzoom, extent.maxzoom);
+    }
+
+    const resource = {
+      name: "Open Waters corridor",
+      description:
+        "Offline Open Waters chart style rendered from the corridor tile cache",
+      type: "mapstyleJSON",
+      url: `/plugins/${PLUGIN_ID}/assets/style-ol.json`,
+    };
+    if (bounds != null) resource.bounds = bounds;
+    if (
+      Number.isFinite(minzoom) &&
+      Number.isFinite(maxzoom) &&
+      minzoom <= maxzoom
+    ) {
+      resource.minzoom = minzoom;
+      resource.maxzoom = maxzoom;
+    }
+    return resource;
+  }
+
+  /**
+   * Registers the plugin as a read-only Signal K `charts` resource
+   * provider (multiple chart providers coexist — the server merges
+   * their listings). Writes and deletes throw, exactly like
+   * charts-provider-simple: the entry is derived from mirror state,
+   * never user-managed. Quiet on servers without provider support.
+   */
+  function registerChartsResourceProvider() {
+    if (!mirrorEnabled()) return;
+    if (typeof app.registerResourceProvider !== "function") return;
+    try {
+      app.registerResourceProvider({
+        type: "charts",
+        methods: {
+          listResources: () => {
+            const resource = styleChartResource();
+            return Promise.resolve(
+              resource == null ? {} : { [STYLE_CHART_ID]: resource },
+            );
+          },
+          getResource: (id) => {
+            if (id !== STYLE_CHART_ID) {
+              return Promise.reject(new Error("Chart not found!"));
+            }
+            const resource = styleChartResource();
+            return resource == null
+              ? Promise.reject(new Error("Chart not available!"))
+              : Promise.resolve(resource);
+          },
+          setResource: (_id, _value) =>
+            Promise.reject(new Error("Not implemented!")),
+          deleteResource: (_id) =>
+            Promise.reject(new Error("Not implemented!")),
+        },
+      });
+      app.debug(`${PLUGIN_ID}: registered as charts resource provider`);
+    } catch (err) {
+      app.error(
+        `${PLUGIN_ID}: charts resource provider registration failed: ${err.message}`,
+      );
+    }
+  }
+
+  /** Last chart resource value emitted as a delta (dedupe guard). */
+  let lastEmittedStyleChart;
+
+  /**
+   * Emits a `resources.charts.<id>` delta whenever the advertised
+   * chart resource changes (appears, bounds grow, or disappears —
+   * null value), so connected clients refresh without polling. The
+   * v2 handleMessage flag keeps resources out of the server's full
+   * model cache, per the resource-provider contract.
+   */
+  function emitStyleChartDelta() {
+    if (typeof app.handleMessage !== "function") return;
+    const resource = styleChartResource();
+    const serialized = resource == null ? null : JSON.stringify(resource);
+    if (serialized === lastEmittedStyleChart) return;
+    lastEmittedStyleChart = serialized;
+    try {
+      app.handleMessage(
+        PLUGIN_ID,
+        {
+          updates: [
+            {
+              values: [
+                {
+                  path: `resources.charts.${STYLE_CHART_ID}`,
+                  value: resource,
+                },
+              ],
+            },
+          ],
+        },
+        2,
+      );
+    } catch (err) {
+      app.error(
+        `${PLUGIN_ID}: cannot emit chart resource delta: ${err.message}`,
       );
     }
   }
@@ -1768,7 +1989,13 @@ module.exports = (app) => {
     }
 
     // Metadata at job start, before the first tile lands (STEP 5; the
-    // consumer drops bound-less stores at load).
+    // consumer drops bound-less stores at load). Tiles accumulate
+    // across jobs, so the advertised extent/zooms are the UNION of the
+    // existing rows, the tiles already on disk (the authority — an
+    // interrupted earlier job may hold coverage beyond its metadata)
+    // and the new corridor: a fresh corridor must never shrink the
+    // chart (Freeboard clips rendering to its bounds, which used to
+    // blank tiles of previous corridors still in the cache).
     for (const source of jobSources) {
       const store = stores.get(source.id);
       store.setFormat(source.format);
@@ -1780,10 +2007,20 @@ module.exports = (app) => {
       if (source.attribution) {
         store.setMetadata("attribution", source.attribution);
       }
-      if (bounds) store.setBounds(bounds);
+      const dataExtent = store.extentFromTiles();
+      const priorBounds = parseBoundsMetadata(store.getMetadata("bounds"));
+      const nextBounds = unionBounds(
+        unionBounds(priorBounds, dataExtent?.bounds),
+        bounds,
+      );
+      if (nextBounds) store.setBounds(nextBounds);
       store.setZoomLevels(
-        Math.min(geometry.minZoom, zoomCaps[source.id]),
-        zoomCaps[source.id],
+        Math.min(
+          geometry.minZoom,
+          zoomCaps[source.id],
+          dataExtent?.minzoom ?? Number.POSITIVE_INFINITY,
+        ),
+        Math.max(zoomCaps[source.id], dataExtent?.maxzoom ?? 0),
       );
       // Stores already holding tiles are visible to the consumer.
       if (store.hasAnyTile()) refreshedSources.add(source.id);
@@ -1981,11 +2218,21 @@ module.exports = (app) => {
    * sprites point at the plugin's asset routes. Everything else passes
    * through unchanged.
    *
+   * The `olCompatible` option builds the OpenLayers variant
+   * (`/assets/style-ol.json`): layers of a type ol-mapbox-style cannot
+   * render are dropped as well, a source left without any layer —
+   * e.g. a raster-dem only ever referenced by `color-relief` layers —
+   * is removed so no client requests tiles nothing will draw, and
+   * `icon-image` values have their `image` expressions unwrapped
+   * (unsupported operator; see `unwrapImageExpressions`), with
+   * `icon-overlap: always` mapped to `icon-allow-overlap: true`.
+   *
    * @param {object} style - Parsed mirrored style
    * @param {string} baseUrl - Absolute base URL ("" → relative URLs)
+   * @param {{olCompatible?: boolean}} [opts]
    * @returns {object}
    */
-  function transformStyle(style, baseUrl) {
+  function transformStyle(style, baseUrl, { olCompatible = false } = {}) {
     const out = structuredClone(style);
     const sourceConfigs = new Map(
       activeSourceConfigs().map((source) => [source.id, source]),
@@ -1994,15 +2241,32 @@ module.exports = (app) => {
     const keptSources = new Set();
     for (const id of Object.keys(out.sources ?? {})) {
       const source = sourceConfigs.get(id);
-      const stem =
-        source != null && storeFileHasTiles(source.path)
-          ? path.basename(source.path, ".mbtiles")
-          : null;
-      if (stem != null) {
+      // The cache's true coverage, derived from its tiles table: drives
+      // both the keep decision AND the source descriptor. Advertising
+      // `bounds`/`minzoom`/`maxzoom` makes clients request only covered
+      // tiles — without them every source is requested viewport-wide
+      // and everything outside the corridor 404s (raster sources get
+      // no pbf-style overzoom synthesis from the provider). Zooms are
+      // honest too: above `maxzoom` clients overzoom cached parents
+      // instead of requesting tiles that cannot exist.
+      const extent = source != null ? extentFromTilesFile(source.path) : null;
+      if (extent != null) {
+        const stem = path.basename(source.path, ".mbtiles");
         out.sources[id].tiles = [
           `${baseUrl}/signalk/v1/api/resources/charts/${stem}/{z}/{x}/{y}`,
         ];
         delete out.sources[id].url;
+        out.sources[id].bounds = extent.bounds;
+        // `minzoom` is deliberately NOT advertised in either variant:
+        // below the cached minimum no tiles exist and none can be
+        // synthesized (overzoom only goes up from an ancestor), so
+        // minzoom merely HIDES the layer around that boundary — in
+        // ol-mapbox-style via a max-resolution clamp, in MapLibre by
+        // skipping rendering — making the chart visibly "disappear"
+        // one level above the data. `maxzoom` stays: above it clients
+        // overzoom cached parents instead of requesting tiles that
+        // cannot exist.
+        out.sources[id].maxzoom = extent.maxzoom;
         keptSources.add(id);
       } else {
         delete out.sources[id];
@@ -2010,9 +2274,41 @@ module.exports = (app) => {
     }
 
     if (Array.isArray(out.layers)) {
-      out.layers = out.layers.filter((layer) =>
-        "source" in layer ? keptSources.has(layer.source) : true,
+      out.layers = out.layers.filter(
+        (layer) =>
+          ("source" in layer ? keptSources.has(layer.source) : true) &&
+          (!olCompatible ||
+            layer.type == null ||
+            OL_RENDERABLE_LAYER_TYPES.has(layer.type)),
       );
+    }
+
+    if (olCompatible) {
+      const referenced = new Set(
+        (out.layers ?? [])
+          .map((layer) => layer.source)
+          .filter((source) => source != null),
+      );
+      for (const id of Object.keys(out.sources ?? {})) {
+        if (!referenced.has(id)) delete out.sources[id];
+      }
+
+      for (const layer of out.layers ?? []) {
+        const layout = layer?.layout;
+        if (layout == null) continue;
+        if (layout["icon-image"] != null) {
+          layout["icon-image"] = unwrapImageExpressions(layout["icon-image"]);
+        }
+        // MapLibre's icon-overlap ≡ the Mapbox icon-allow-overlap that
+        // ol-mapbox-style reads: "always" icons (lights, rocks —
+        // safety symbology) must not be decluttered away.
+        if (layout?.["icon-overlap"] === "always") {
+          layout["icon-allow-overlap"] = true;
+          delete layout["icon-overlap"];
+        } else if ("icon-overlap" in layout) {
+          delete layout["icon-overlap"];
+        }
+      }
     }
 
     if (out.glyphs) {
@@ -2156,6 +2452,7 @@ module.exports = (app) => {
       // enough to serve it (clients fall back otherwise).
       if (style != null) {
         manifest.style = `${baseUrl}/plugins/${PLUGIN_ID}/assets/style.json`;
+        manifest.styleOl = `${baseUrl}/plugins/${PLUGIN_ID}/assets/style-ol.json`;
         for (const entry of collectSpriteEntries(style)) {
           manifest.sprites[entry.id] =
             `${baseUrl}/plugins/${PLUGIN_ID}/assets/sprites/${entry.id}`;
@@ -2172,6 +2469,27 @@ module.exports = (app) => {
         return;
       }
       res.json(transformStyle(style, baseUrlFromRequest(req)));
+    });
+
+    /**
+     * The OpenLayers-compatible style variant for Freeboard SK
+     * (ol-mapbox-style): same URL rewriting as `/assets/style.json`,
+     * minus layers OL cannot render. Dropped most notably is the
+     * `color-relief` depth shading — in ol-mapbox-style it does not
+     * merely render nothing, it rejects the whole `apply()` call —
+     * and `icon-image` `image` expressions are unwrapped so the
+     * seamark symbols (lights, buoys, topmarks) render instead of
+     * styling every feature to nothing.
+     */
+    router.get("/assets/style-ol.json", (req, res) => {
+      const style = readMirrorStyle();
+      if (style == null) {
+        res.status(404).json({ message: "Style not mirrored" });
+        return;
+      }
+      res.json(
+        transformStyle(style, baseUrlFromRequest(req), { olCompatible: true }),
+      );
     });
 
     /**
@@ -2268,3 +2586,6 @@ module.exports.sourcePath = sourcePath;
 module.exports.glyphRangeNames = glyphRangeNames;
 module.exports.resolveConfig = resolveConfig;
 module.exports.formatForUrlTemplate = formatForUrlTemplate;
+module.exports.unwrapImageExpressions = unwrapImageExpressions;
+module.exports.unionBounds = unionBounds;
+module.exports.parseBoundsMetadata = parseBoundsMetadata;
