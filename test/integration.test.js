@@ -106,12 +106,19 @@ describe("downloader integration (real fetch + real store)", () => {
 
   test("drops 200 OK JSON rate-limit bodies over real HTTP (Addendum 6)", async () => {
     const store = new MbTilesStore(dbPath);
+    // Mock clock: the rate-limit penalty is time-based, and a deferred
+    // tile only becomes fetchable again once its penalty expires. A
+    // no-op sleep would never let that happen, so the loop hangs.
+    let mockTime = 1000;
     const downloader = createDownloader({
       getStore: () => store,
       templates: { seamap: `${baseUrl}/ratelimited/{z}/{x}/{y}.png` },
       userAgent: "IntegrationTest/1.0",
       throttleMs: 1,
-      sleepFn: () => Promise.resolve(),
+      sleepFn: async () => {
+        mockTime += 5 * 60 * 1000;
+      },
+      nowFn: () => mockTime,
     });
 
     downloader.start([{ z: 8, x: 14, y: 141, yTms: 114 }]);

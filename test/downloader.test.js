@@ -6,10 +6,13 @@ const {
   backoffDelay,
   createDownloader,
   DEFAULT_SOURCE,
+  defaultSleep,
+  hostOf,
   isMvtBody,
   isPngBody,
   EMPTY_PBF,
   MIN_PNG_BYTES,
+  parseRetryAfter,
   PNG_SIGNATURE,
   RATE_LIMIT_PENALTY_BASE_MS,
   RATE_LIMIT_PENALTY_MAX_MS,
@@ -240,17 +243,17 @@ describe("downloader", () => {
     downloader.start(tiles3().slice(0, 2));
     await jobSettled(downloader);
 
-    // Tile 1: 429 (penalty 5 min), 503 (penalty 10 min), then success
+    // Tile 1: 429 (penalty 5 min, deferred), 503 (penalty 10 min,
+    // deferred), then success. Each deferral sleeps the penalty (the
+    // all-throttled branch) while other hosts could proceed.
     assert.deepEqual(sleeps.slice(0, 2), [
       RATE_LIMIT_PENALTY_BASE_MS,
       RATE_LIMIT_PENALTY_BASE_MS * 2,
     ]);
-    // The pre-request shared throttle (awaitThrottle) accounts for
-    // elapsed time: after 15 min of rate-limit backoff sleeps, the
-    // 100 ms inter-tile throttle is already satisfied, so no third
-    // sleep is recorded. Success reset the penalty (throttleMs is back
-    // to the configured 100 ms).
-    assert.equal(sleeps.length, 2);
+    // After tile 1's success, tile 2 fetches immediately after (no
+    // 15-min gap in the new defer model), so the configured 100 ms
+    // inter-tile throttle applies — a third, small sleep.
+    assert.deepEqual(sleeps.slice(2), [100]);
     assert.equal(calls.length, 4);
     const s = downloader.status();
     assert.equal(s.completed, 2);
@@ -320,6 +323,212 @@ describe("downloader", () => {
     assert.ok(sleeps.every((ms) => ms >= RATE_LIMIT_PENALTY_BASE_MS));
     assert.ok(sleeps.every((ms) => ms <= RATE_LIMIT_PENALTY_MAX_MS));
     assert.equal(downloader.status().failed, 1);
+  });
+
+  test("429 with Retry-After: 1s is honored with no 5-minute floor", async () => {
+    const store = fakeStore();
+    const headers = {
+      get: (n) => (n.toLowerCase() === "retry-after" ? "1" : null),
+    };
+    const { downloader, sleeps } = makeDownloader(store, [
+      { ok: false, status: 429, headers },
+      okResponse(),
+    ]);
+    downloader.start([{ z: 8, x: 1, y: 2, yTms: 3 }]);
+    await jobSettled(downloader);
+
+    // The server said retry in 1s: we waited 1s, not the 5-minute ladder.
+    assert.deepEqual(sleeps, [1000]);
+    assert.equal(downloader.status().completed, 1);
+  });
+
+  test("429 with Retry-After is capped at the 30-minute ceiling", async () => {
+    const store = fakeStore();
+    const headers = {
+      get: (n) =>
+        n.toLowerCase() === "retry-after"
+          ? String(2 * 60 * 60) // 2 hours
+          : null,
+    };
+    const { downloader, sleeps } = makeDownloader(store, [
+      { ok: false, status: 429, headers },
+      okResponse(),
+    ]);
+    downloader.start([{ z: 8, x: 1, y: 2, yTms: 3 }]);
+    await jobSettled(downloader);
+
+    assert.deepEqual(sleeps, [RATE_LIMIT_PENALTY_MAX_MS]);
+    assert.equal(downloader.status().completed, 1);
+  });
+
+  test("429 with Retry-After: 0 falls back to the ladder (no tight loop)", async () => {
+    // Retry-After: 0 means "retry now" — no usable delay. Honoring it
+    // literally would set a 0-duration penalty and spin a tight
+    // refetch loop. Falling back to the SPEC ladder (base 5 min)
+    // avoids that while still honoring any positive Retry-After.
+    const store = fakeStore();
+    const headers = {
+      get: (n) => (n.toLowerCase() === "retry-after" ? "0" : null),
+    };
+    const mockTime = 1000;
+    const { downloader, sleeps } = makeDownloader(store, [
+      { ok: false, status: 429, headers },
+      okResponse(),
+    ]);
+    downloader.start([{ z: 8, x: 1, y: 2, yTms: 3 }]);
+    await jobSettled(downloader);
+
+    // Fell back to the base penalty, not 0.
+    assert.deepEqual(sleeps, [RATE_LIMIT_PENALTY_BASE_MS]);
+    assert.equal(downloader.status().completed, 1);
+  });
+
+  test("429 on one host does not penalize another host's tiles", async () => {
+    const store = fakeStore();
+    const sleeps = [];
+    const calls = [];
+    let i = 0;
+    let mockTime = 1000;
+    // Host A 429s once, then recovers; host B always succeeds.
+    const responses = [
+      { ok: false, status: 429, headers: { get: () => null } }, // A
+      okResponse(), // A (after the 1st-level penalty wait)
+      okResponse(), // B
+    ];
+    const dl = createDownloader({
+      getStore: () => store,
+      templates: {
+        a: "https://a.example/{z}/{x}/{y}.png",
+        b: "https://b.example/{z}/{x}/{y}.png",
+      },
+      formats: { default: "png", a: "png", b: "png" },
+      format: "png",
+      userAgent: "TestUA/1.0",
+      throttleMs: 0,
+      fetchFn: (url, init) => {
+        calls.push({ url, init });
+        const r = responses[i++];
+        return Promise.resolve(r);
+      },
+      sleepFn: async (ms) => {
+        sleeps.push(ms);
+        mockTime += ms;
+        await new Promise((r) => setImmediate(r));
+      },
+      nowFn: () => mockTime,
+      log: () => {},
+    });
+    dl.start([
+      { z: 8, x: 1, y: 2, yTms: 3, source: "a" },
+      { z: 8, x: 4, y: 5, yTms: 6, source: "b" },
+    ]);
+    await jobSettled(dl);
+
+    // Only the A penalty wait (5 min) is slept; B's tile needed no
+    // penalty wait — it fetched while A was throttled, incurring at
+    // most the (0 ms) configured throttle.
+    assert.deepEqual(sleeps, [RATE_LIMIT_PENALTY_BASE_MS]);
+    assert.equal(calls.length, 3);
+    assert.equal(dl.status().completed, 2);
+    assert.equal(dl.status().failed, 0);
+  });
+
+  test("a successful fetch clears the host's penalty", async () => {
+    // A 429 escalates A to 5 min; a success clears it, so the NEXT 429
+    // (without Retry-After) starts fresh at 5 min — not doubled.
+    const store = fakeStore();
+    const sleeps = [];
+    let i = 0;
+    let mockTime = 1000;
+    const responses = [
+      { ok: false, status: 429, headers: { get: () => null } }, // 5m
+      okResponse(), // success → penalty cleared
+      { ok: false, status: 429, headers: { get: () => null } }, // fresh 5m
+      okResponse(), // success
+    ];
+    const dl = createDownloader({
+      getStore: () => store,
+      templates: { [DEFAULT_SOURCE]: "https://a.example/{z}/{x}/{y}.png" },
+      formats: { default: "png", [DEFAULT_SOURCE]: "png" },
+      format: "png",
+      userAgent: "TestUA/1.0",
+      throttleMs: 0,
+      fetchFn: () => Promise.resolve(responses[i++]),
+      sleepFn: async (ms) => {
+        sleeps.push(ms);
+        mockTime += ms;
+        await new Promise((r) => setImmediate(r));
+      },
+      nowFn: () => mockTime,
+      log: () => {},
+    });
+    dl.start([
+      { z: 8, x: 1, y: 2, yTms: 3 },
+      { z: 8, x: 4, y: 5, yTms: 6 },
+    ]);
+    await jobSettled(dl);
+
+    // Each tile: 429 (wait 5m), success. The success between them
+    // cleared the penalty, so the second 429 is base — not doubled.
+    assert.deepEqual(sleeps, [
+      RATE_LIMIT_PENALTY_BASE_MS,
+      RATE_LIMIT_PENALTY_BASE_MS,
+    ]);
+    assert.equal(dl.status().completed, 2);
+  });
+
+  test("wake() during a rate-limit penalty does not starve the event loop", async () => {
+    // Regression: once a host was penalized, the penalty-wait branch
+    // looped `await sleepFn(wait, () => cancelled || wakeRequested);
+    // continue;`. defaultSleep returned a *microtask* when its
+    // isCancelled gate was true, and wakeRequested — set by wake()
+    // (a network.internet.state delta) or enqueueRecovery (the vessel
+    // moving >1 NM) — was never cleared here, so the loop spun without
+    // yielding. The event loop starved: no HTTP served, no timers fired,
+    // the server hung for as long as the penalty lasted. The real
+    // defaultSleep (production sleep) is used here, not a stub.
+    const store = fakeStore();
+    const dl = createDownloader({
+      getStore: () => store,
+      templates: {
+        [DEFAULT_SOURCE]: "https://tiles.openwaters.io/seamap/{z}/{x}/{y}.pbf",
+      },
+      formats: { default: "pbf", [DEFAULT_SOURCE]: "pbf" },
+      format: "pbf",
+      userAgent: "TestUA/1.0",
+      throttleMs: 0,
+      // Wrong Content-Type for a pbf source → escalatePenalty (5 min),
+      // tile deferred (rateLimited), all remaining tiles on the host.
+      fetchFn: () =>
+        Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: {
+            get: (n) =>
+              n.toLowerCase() === "content-type" ? "image/png" : null,
+          },
+          arrayBuffer: async () => Buffer.from("nope"),
+          body: { cancel: async () => {} },
+        }),
+      sleepFn: defaultSleep,
+      getInternetState: () => null,
+      log: () => {},
+    });
+    dl.start([
+      { z: 8, x: 1, y: 2, yTms: 3 },
+      { z: 8, x: 4, y: 5, yTms: 6 },
+      { z: 8, x: 7, y: 8, yTms: 9 },
+    ]);
+    // Let the first fetch land and trigger the penalty.
+    await new Promise((r) => setImmediate(r));
+    dl.wake(); // as a network.internet.state delta would
+    // This timer fires ONLY if the event loop is alive. Before the fix
+    // the penalty-wait branch spun as microtasks and this never fired —
+    // the test would hang until the node:test timeout.
+    await new Promise((r) => setTimeout(r, 80));
+    dl.cancel();
+    await jobSettled(dl);
+    assert.equal(dl.status().state, "cancelled");
   });
 
   test("cancel aborts the loop: no insert, no further fetches", async () => {
@@ -935,5 +1144,65 @@ describe("MVT body sniffing", () => {
     assert.ok(!isMvtBody(Buffer.from([0x1a, 0x09, 0x12])));
     // Wire type 3 (group) is not valid MVT
     assert.ok(!isMvtBody(Buffer.from([0x7b, 0x00])));
+  });
+});
+
+describe("hostOf", () => {
+  test("extracts host and port from a URL", () => {
+    assert.equal(
+      hostOf("https://tiles.openwaters.io/seamap/8/1/2.pbf"),
+      "tiles.openwaters.io",
+    );
+    assert.equal(
+      hostOf("http://127.0.0.1:3000/charts/8/1/2.png"),
+      "127.0.0.1:3000",
+    );
+  });
+
+  test("returns empty string for an unparseable URL", () => {
+    assert.equal(hostOf("not a url"), "");
+    assert.equal(hostOf(""), "");
+  });
+});
+
+describe("parseRetryAfter", () => {
+  test("parses delta-seconds into milliseconds", () => {
+    const h = {
+      get: (n) => (n.toLowerCase() === "retry-after" ? "120" : null),
+    };
+    assert.equal(parseRetryAfter(h, 1000), 120000);
+  });
+
+  test("parses an HTTP-date relative to now", () => {
+    const now = Date.now();
+    // 60 seconds in the future
+    const future = new Date(now + 60000).toUTCString();
+    const h = {
+      get: (n) => (n.toLowerCase() === "retry-after" ? future : null),
+    };
+    const ms = parseRetryAfter(h, now);
+    assert.ok(ms >= 55000 && ms <= 65000, `expected ~60000, got ${ms}`);
+  });
+
+  test("a past HTTP-date (retry now) yields no usable delay (null)", () => {
+    const now = Date.now();
+    const past = new Date(now - 10000).toUTCString();
+    const h = { get: (n) => (n.toLowerCase() === "retry-after" ? past : null) };
+    // A past date means "retry now" — returning null falls back to the
+    // SPEC ladder instead of a 0-duration penalty that would spin a
+    // tight refetch loop.
+    assert.equal(parseRetryAfter(h, now), null);
+  });
+
+  test("returns null when the header is absent", () => {
+    assert.equal(parseRetryAfter({ get: () => null }, 1000), null);
+    assert.equal(parseRetryAfter(undefined, 1000), null);
+  });
+
+  test("returns null for an unparseable value", () => {
+    const h = {
+      get: (n) => (n.toLowerCase() === "retry-after" ? "soon" : null),
+    };
+    assert.equal(parseRetryAfter(h, 1000), null);
   });
 });

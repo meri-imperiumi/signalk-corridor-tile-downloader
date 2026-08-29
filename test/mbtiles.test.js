@@ -5,7 +5,11 @@ const os = require("node:os");
 const path = require("node:path");
 const { DatabaseSync } = require("node:sqlite");
 
-const { MbTilesStore, isIoError } = require("../lib/mbtiles.js");
+const {
+  MbTilesStore,
+  CHECKPOINT_INTERVAL,
+  isIoError,
+} = require("../lib/mbtiles.js");
 
 let dir;
 let dbPath;
@@ -151,6 +155,38 @@ describe("MbTilesStore", () => {
     const second = new MbTilesStore(dbPath);
     assert.equal(second.hasTile(10, 200, 300), true);
     second.close();
+  });
+
+  test("periodic checkpoint flushes tiles into the main database", () => {
+    // Committed tiles live in the `-wal` sidecar until a checkpoint
+    // moves them into the main database. charts-provider-simple's
+    // startup housekeeping deletes sidecars, and a crash before the
+    // close-time checkpoint loses them. Periodic PASSIVE checkpoints
+    // (every CHECKPOINT_INTERVAL inserts) flush tiles into the main db
+    // during the download so a restart loses at most that many — not
+    // the whole session.
+    const store = new MbTilesStore(dbPath);
+    const baseline = fs.statSync(dbPath).size;
+    // Just under the interval: tiles stay in the WAL, main db holds
+    // only the schema (one page).
+    for (let i = 0; i < CHECKPOINT_INTERVAL - 1; i++) {
+      store.insertTile(8, i, i, Buffer.alloc(600, i));
+    }
+    assert.equal(fs.statSync(dbPath).size, baseline);
+    // One more insert trips the periodic checkpoint: the queued tiles
+    // flush into the main database, so its file size jumps well past
+    // the schema-only baseline.
+    store.insertTile(
+      8,
+      CHECKPOINT_INTERVAL - 1,
+      CHECKPOINT_INTERVAL - 1,
+      Buffer.alloc(600, 0xff),
+    );
+    assert.ok(
+      fs.statSync(dbPath).size > baseline + 10000,
+      "periodic checkpoint did not flush tiles into the main database",
+    );
+    store.close();
   });
 
   test("vacuum reclaims space without losing tiles", () => {

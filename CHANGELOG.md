@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Resume no longer hangs the server: when an in-flight download is
+  resumed at startup and the next tile fetch triggers a per-host
+  rate-limit penalty (429/503, or a wrong Content-Type such as an
+  `image/png` body for a pbf source), every remaining tile on that host
+  is deferred and the download loop parks in its penalty-wait branch
+  — `await sleepFn(wait, () => cancelled || wakeRequested); continue;`.
+  `defaultSleep` resolved as a *microtask* whenever its `isCancelled`
+  gate was true, and `wakeRequested` — set by `wake()` (a
+  `network.internet.state` delta) or `enqueueRecovery` (the vessel
+  moving more than 1 NM) and only ever cleared inside `waitSuspend` —
+  stayed set, so that loop spun without yielding: the event loop
+  starved, no HTTP was served, no timers fired, and the server hung
+  for as long as the penalty lasted (and, once woken again, forever).
+  The penalty-wait branch now drains `wakeRequested` before sleeping
+  (mirroring `waitSuspend`), and `defaultSleep` resolves on the next
+  macrotask tick rather than as a microtask when already cancelled, so
+  no `await sleep; continue;` loop can ever starve the event loop.
 - Self-healing MBTiles store: signalk-charts-provider-simple's startup
   housekeeping deletes live `*.mbtiles-wal` sidecars, wedging the
   shared wal-index (`-shm`) and failing every read-only open — tile
