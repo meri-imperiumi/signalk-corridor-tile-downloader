@@ -1573,7 +1573,10 @@ describe("configuration", () => {
   test("expandHome resolves ~ to the home directory", () => {
     const expanded = pluginFactory.expandHome("~/charts/cache.mbtiles");
     assert.ok(!expanded.startsWith("~"));
-    assert.ok(expanded.endsWith("charts/cache.mbtiles"));
+    // path.join uses the platform separator (backslash on Windows), so
+    // compare against the canonical expanded form rather than a literal
+    // forward-slash suffix.
+    assert.equal(expanded, path.join(os.homedir(), "charts/cache.mbtiles"));
   });
 
   test("zoom order is normalized and bad URL templates fall back", () => {

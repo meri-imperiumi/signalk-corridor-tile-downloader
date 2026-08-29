@@ -166,62 +166,77 @@ describe("MbTilesStore", () => {
 });
 
 describe("MbTilesStore WAL sidecar self-healing", () => {
-  test("heals when charts-provider housekeeping deletes the live WAL", () => {
-    const store = new MbTilesStore(dbPath);
-    store.insertTile(10, 200, 300, Buffer.from([1, 2, 3]));
+  // This scenario unlinks a WAL sidecar the store still holds open.
+  // POSIX lets an open file's inode survive unlinking, so committed
+  // frames stay stranded in the deleted WAL and wedge the wal-index
+  // (fresh read-only opens fail with SQLITE_IOERR). Windows refuses
+  // the unlink outright with EBUSY — and so does the consumer plugin's
+  // housekeeping in production on Windows, meaning the wedged-wal-index
+  // condition this test simulates cannot arise there. Skip on Windows.
+  const liveWalHealTest = process.platform === "win32" ? test.skip : test;
 
-    // The consumer plugin's startup cleanup unlinks live *.mbtiles-wal
-    // sidecars. With committed frames stranded in the unlinked WAL, the
-    // stale wal-index (-shm) wedges fresh read-only opens — its
-    // chart-metadata endpoint — with SQLITE_IOERR "disk I/O error".
-    fs.unlinkSync(`${dbPath}-wal`);
-    assert.equal(fs.existsSync(`${dbPath}-wal`), false);
-    assert.throws(
-      () => {
-        const poisoned = new DatabaseSync(dbPath, { readOnly: true });
-        poisoned.prepare("SELECT COUNT(*) AS n FROM tiles").get();
-        poisoned.close();
-      },
-      (err) => err.errcode === 522 || err.errcode === 10,
-      "expected the wedged wal-index to fail read-only opens",
-    );
+  liveWalHealTest(
+    "heals when charts-provider housekeeping deletes the live WAL",
+    () => {
+      const store = new MbTilesStore(dbPath);
+      store.insertTile(10, 200, 300, Buffer.from([1, 2, 3]));
 
-    // The endpoint leaks its failed connection (the query threw before
-    // its close), pinning the stale wal-index. The heal must still work
-    // around it.
-    const leaked = new DatabaseSync(dbPath, { readOnly: true });
+      // The consumer plugin's startup cleanup unlinks live *.mbtiles-wal
+      // sidecars. With committed frames stranded in the unlinked WAL, the
+      // stale wal-index (-shm) wedges fresh read-only opens — its
+      // chart-metadata endpoint — with SQLITE_IOERR "disk I/O error".
+      fs.unlinkSync(`${dbPath}-wal`);
+      assert.equal(fs.existsSync(`${dbPath}-wal`), false);
+      assert.throws(
+        () => {
+          const poisoned = new DatabaseSync(dbPath, { readOnly: true });
+          poisoned.prepare("SELECT COUNT(*) AS n FROM tiles").get();
+          poisoned.close();
+        },
+        (err) => err.errcode === 522 || err.errcode === 10,
+        "expected the wedged wal-index to fail read-only opens",
+      );
 
-    // The next per-tile touchpoint detects the missing sidecar and
-    // rebuilds the handle: the heal checkpoints the unlinked WAL's
-    // frames into the main database (the tile survives), discards the
-    // pinned wal-index and recreates a consistent -wal/-shm pair.
-    assert.equal(store.hasTile(10, 200, 300), true);
-    assert.ok(fs.existsSync(`${dbPath}-wal`));
+      // The endpoint leaks its failed connection (the query threw before
+      // its close), pinning the stale wal-index. The heal must still work
+      // around it.
+      const leaked = new DatabaseSync(dbPath, { readOnly: true });
 
-    const reader = new DatabaseSync(dbPath, { readOnly: true });
-    assert.equal(reader.prepare("SELECT COUNT(*) AS n FROM tiles").get().n, 1);
-    reader.close();
-    try {
-      leaked.close();
-    } catch {
-      // The leaked connection is already broken beyond closing
-    }
+      // The next per-tile touchpoint detects the missing sidecar and
+      // rebuilds the handle: the heal checkpoints the unlinked WAL's
+      // frames into the main database (the tile survives), discards the
+      // pinned wal-index and recreates a consistent -wal/-shm pair.
+      assert.equal(store.hasTile(10, 200, 300), true);
+      assert.ok(fs.existsSync(`${dbPath}-wal`));
 
-    // Reads keep working after the leak is gone too
-    const afterLeak = new DatabaseSync(dbPath, { readOnly: true });
-    assert.equal(
-      afterLeak.prepare("SELECT COUNT(*) AS n FROM tiles").get().n,
-      1,
-    );
-    afterLeak.close();
+      const reader = new DatabaseSync(dbPath, { readOnly: true });
+      assert.equal(
+        reader.prepare("SELECT COUNT(*) AS n FROM tiles").get().n,
+        1,
+      );
+      reader.close();
+      try {
+        leaked.close();
+      } catch {
+        // The leaked connection is already broken beyond closing
+      }
 
-    // Writes continue on the healed handle and stay visible to readers
-    assert.equal(store.insertTile(10, 200, 301, Buffer.from([4])), true);
-    const after = new DatabaseSync(dbPath, { readOnly: true });
-    assert.equal(after.prepare("SELECT COUNT(*) AS n FROM tiles").get().n, 2);
-    after.close();
-    store.close();
-  });
+      // Reads keep working after the leak is gone too
+      const afterLeak = new DatabaseSync(dbPath, { readOnly: true });
+      assert.equal(
+        afterLeak.prepare("SELECT COUNT(*) AS n FROM tiles").get().n,
+        1,
+      );
+      afterLeak.close();
+
+      // Writes continue on the healed handle and stay visible to readers
+      assert.equal(store.insertTile(10, 200, 301, Buffer.from([4])), true);
+      const after = new DatabaseSync(dbPath, { readOnly: true });
+      assert.equal(after.prepare("SELECT COUNT(*) AS n FROM tiles").get().n, 2);
+      after.close();
+      store.close();
+    },
+  );
 
   test("insertTile retries once after a transient SQLITE_IOERR", () => {
     const store = new MbTilesStore(dbPath);
