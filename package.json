@@ -27,6 +27,9 @@
   "signalk": {
     "displayName": "Corridor Tile Downloader",
     "appIcon": "./icon.png",
+    "screenshots": [
+      "./doc/download.png"
+    ],
     "requires": [
       "signalk-charts-provider-simple",
       "@meri-imperiumi/signalk-internet"
