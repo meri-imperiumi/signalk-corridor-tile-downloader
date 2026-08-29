@@ -1,9 +1,10 @@
 /**
  * Manual target coordinate panel: fetch trigger for a single lat/lon
- * point (no active route or GPX file needed). Validates input locally
- * and POSTs one coordinate to /fetch-target; the backend builds the
- * multi-tier corridor (approach rings, tactical/strategic swaths)
- * around the point.
+ * target (no active route or GPX file needed). Validates input locally
+ * and POSTs one coordinate to /fetch-target; the backend prepends
+ * the vessel's current position so the corridor follows the great
+ * circle from the vessel to the target (or buffers a bubble around
+ * the target alone when no GPS fix is available).
  *
  * @file components/target-panel.js
  */
@@ -84,8 +85,9 @@ class CtdTargetPanel extends HTMLElement {
       <div class="sk-card theme-teal">
         <h2 class="label">Target coordinate corridor</h2>
         <p class="desc">
-          Fetches the multi-tier tile corridor around a single point —
-          no active route or GPX file needed.
+          Fetches the great-circle corridor from the vessel's current
+          position to a target point — no active route or GPX file
+          needed.
         </p>
         <div class="row">
           <div class="field">

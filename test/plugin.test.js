@@ -571,6 +571,98 @@ describe("plugin", () => {
     }
   });
 
+  test("fetch-target with one coordinate plots the corridor from the vessel position to the target", async () => {
+    // A single target point on its own covers only the destination;
+    // prepending the vessel's current position turns it into the
+    // great-circle passage corridor the user expects.
+    app.selfTree["navigation.position.value"] = {
+      latitude: -18.85,
+      longitude: -159.78,
+    };
+    const fetch = countingFetch();
+    startWithTestHooks({
+      fetch: fetch.fn,
+      minZoom: 8,
+      maxZoom: 8,
+      strategicMarginNM: 0.1,
+      tacticalMarginNM: 0.1,
+      approachRadiusNM: 0.1,
+    });
+    plugin.registerWithRouter(app.router);
+
+    const res = makeRes();
+    route(
+      app,
+      "post",
+      "/fetch-target",
+    )(
+      {
+        body: {
+          coordinates: [{ lat: -19.05, lon: -169.85 }],
+        },
+      },
+      res,
+    );
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    // A single-point bubble at z8 with tiny margins is a few tiles; the
+    // two-endpoint corridor spans the whole 10-degree passage.
+    assert.ok(
+      res.body.totalTiles > 1,
+      `expected a corridor, not a single-point bubble (got ${res.body.totalTiles})`,
+    );
+
+    await waitUntil(() => {
+      const s = makeRes();
+      route(app, "get", "/status")({}, s);
+      return s.body.state === "completed";
+    });
+
+    // The fetched corridor tiles span the passage: an Aitutaki-side and
+    // a Niue-side tile both appear, proving both endpoints buffered.
+    const lons = fetch.calls
+      .map((url) => {
+        const m = /\/(\d+)\/(\d+)\/(\d+)\.(?:png|pbf|webp)$/.exec(url);
+        if (!m) return null;
+        const z = Number(m[1]);
+        const x = Number(m[2]);
+        return (x / 2 ** z) * 360 - 180;
+      })
+      .filter((lon) => lon != null);
+    assert.ok(
+      lons.length > 0,
+      `expected tile fetches, got ${fetch.calls.length} calls`,
+    );
+    assert.ok(
+      lons.some((lon) => lon < -161),
+      "expected a tile near Aitutaki's longitude",
+    );
+    assert.ok(
+      lons.some((lon) => lon > -169),
+      "expected a tile near Niue's longitude",
+    );
+  });
+
+  test("fetch-target with one coordinate falls back to the target alone without a vessel fix", () => {
+    startWithTestHooks();
+    plugin.registerWithRouter(app.router);
+
+    const res = makeRes();
+    route(
+      app,
+      "post",
+      "/fetch-target",
+    )(
+      {
+        body: {
+          coordinates: [{ lat: -19.05, lon: -169.85 }],
+        },
+      },
+      res,
+    );
+    assert.equal(res.statusCode, 200);
+    assert.ok(res.body.totalTiles > 0);
+  });
+
   test("fetch-active-route without an active route returns 404", () => {
     startWithTestHooks();
     plugin.registerWithRouter(app.router);

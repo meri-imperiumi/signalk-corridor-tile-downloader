@@ -38,7 +38,12 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { DatabaseSync } = require("node:sqlite");
-const { bubbleTiles, corridorTiles, distanceNM } = require("./lib/geometry.js");
+const {
+  bubbleTiles,
+  corridorTiles,
+  distanceNM,
+  isValidCoordinate,
+} = require("./lib/geometry.js");
 const { MbTilesStore, nodeSupportsSqlite } = require("./lib/mbtiles.js");
 const {
   createDownloader,
@@ -1571,6 +1576,27 @@ module.exports = (app) => {
   }
 
   /**
+   * Reads the vessel's current position from `navigation.position`.
+   * A single target coordinate is meaningless as a corridor on its
+   * own — `/fetch-target` prepends this position so the corridor
+   * follows the great circle from the vessel to the target. Returns
+   * null when no fix is available (the target then buffers a bubble
+   * around itself, the documented fallback).
+   *
+   * @returns {{lat: number, lon: number}|null}
+   */
+  function getVesselPosition() {
+    const raw = app.getSelfPath?.("navigation.position.value");
+    const value = raw && typeof raw === "object" ? (raw.value ?? raw) : raw;
+    if (!value || typeof value !== "object") return null;
+    const position = {
+      lat: Number(value.latitude),
+      lon: Number(value.longitude),
+    };
+    return isValidCoordinate(position) ? position : null;
+  }
+
+  /**
    * Resolves the currently active route from the Signal K tree.
    *
    * @returns {{coordinates: Array<{lat: number, lon: number}>, name: string}|null}
@@ -2061,9 +2087,24 @@ module.exports = (app) => {
             "Body must contain a non-empty coordinates array",
           );
         }
+        // A single target coordinate plots the great-circle corridor
+        // from the vessel's current position to the target, not a
+        // bubble around the target alone: a one-point corridor covers
+        // only the destination, leaving the whole passage uncached.
+        // Without a GPS fix we fall back to the target alone so the
+        // panel still works before navigation.position is published.
+        let coordinates = body.coordinates;
+        let name = body.name || "Custom target";
+        if (coordinates.length === 1) {
+          const vessel = getVesselPosition();
+          if (vessel) {
+            coordinates = [vessel, ...coordinates];
+            if (!body.name) name = `Target from vessel to ${coordinates[1]}`;
+          }
+        }
         const { totalTiles } = startJob(
-          body.coordinates,
-          body.name || "Custom target",
+          coordinates,
+          name,
           body.forceOnMetered === true,
         );
         res.json({ status: "started", totalTiles });

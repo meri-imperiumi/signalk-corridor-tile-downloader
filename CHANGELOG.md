@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- A single target coordinate now plots the great-circle corridor from
+  the vessel's current `navigation.position` to the target, instead of
+  buffering a bubble around the target alone. The one-point corridor
+  covered only the destination, leaving the whole passage uncached — a
+  600 NM route produced a few hundred tiles around the arrival point
+  and nothing along the track. Without a GPS fix the target alone is
+  still buffered (the documented fallback) so the target panel works
+  before a position is published.
+
 ## [0.1.0] - 2026-08-28
 
 ### Fixed
