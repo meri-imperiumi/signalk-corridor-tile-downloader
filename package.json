@@ -1,7 +1,7 @@
 {
   "name": "@meri-imperiumi/signalk-corridor-tile-downloader",
   "version": "0.1.0",
-  "description": "Pre-cache marine chart tile corridors into MBTiles for offline navigation",
+  "description": "Pre-cache marine chart tiles along a route for offline navigation",
   "main": "index.js",
   "repository": {
     "type": "git",
