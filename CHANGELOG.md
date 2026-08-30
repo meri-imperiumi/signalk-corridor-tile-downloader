@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Corridor bounds are now antimeridian-aware, so westbound (or
+  eastbound) passages crossing 180° longitude download correctly.
+  Previously `boundsWithMargin` took the naive min/max of longitude,
+  spanning the long way around the world for a dateline-crossing route:
+  the low-zoom overview pyramid then fetched near-worldwide tiles at the
+  corridor's latitudes (a ~25x blowup for a Samoa–Fiji sized passage)
+  while its rows still missed the corridor's own tiles right at the
+  seam — zooming out below the minimum zoom blanked the chart exactly
+  where the passage crosses 180°. Route longitudes are now unwrapped to
+  a contiguous span (each vertex shifted ±360° to stay within 180° of
+  its predecessor, matching the great-circle engine's short-way
+  choice), and a span crossing the seam is split into two valid bounds
+  boxes that drive the overview pyramid on both sides. The MBTiles
+  `bounds` metadata row keeps a single box (the format cannot express
+  wrapping): for seam-crossing corridors it collapses to the
+  full-width box so clipping consumers never blank cached tiles on
+  either side. `boundsWithMargin` now returns an array of boxes,
+  `overviewTiles` takes that array, and `corridorTiles` returns them
+  under `boxes` (was `bounds`).
+
 - `transformStyle` strips the upstream chart author's demo camera
   (`center`/`zoom`/`bearing`/`pitch`) from the mirrored styles
   (`/assets/style.json` and `/assets/style-ol.json`). That camera points

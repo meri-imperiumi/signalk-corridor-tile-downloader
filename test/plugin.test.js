@@ -714,6 +714,109 @@ describe("plugin", () => {
     assert.equal(res2.body.totalTiles, 0, "re-run refetches nothing");
   });
 
+  test("a westbound corridor crossing the antimeridian covers both sides of 180°", async () => {
+    // Samoa (171.8W) -> Fiji (178E): a westbound passage across the
+    // dateline. The corridor tiles, the overview pyramid, and the
+    // metadata bounds must all treat the two sides of the seam as
+    // one contiguous passage (split bounds boxes), not span the long
+    // way around the world with a hole at 180°
+    const fetch1 = countingFetch();
+    startWithTestHooks({ minZoom: 8, maxZoom: 8, fetch: fetch1.fn });
+    plugin.registerWithRouter(app.router);
+
+    const res = makeRes();
+    route(
+      app,
+      "post",
+      "/fetch-target",
+    )(
+      {
+        body: {
+          coordinates: [
+            { lat: -14.0, lon: -171.8 }, // Samoa
+            { lat: -17.8, lon: 178.0 }, // Fiji
+          ],
+        },
+      },
+      res,
+    );
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    await waitUntil(() => {
+      const s = makeRes();
+      route(app, "get", "/status")({}, s);
+      return s.body.state === "completed";
+    });
+
+    // Every fetched tile touches the seam region: none lies fully in
+    // the middle of the world (the old world-spanning overview
+    // fetched near-global rows at these latitudes)
+    const spans = fetch1.calls
+      .map((url) => {
+        const m = /\/(\d+)\/(\d+)\/(\d+)\.(?:png|pbf|webp)$/.exec(url);
+        if (!m) return null;
+        const z = Number(m[1]);
+        const x = Number(m[2]);
+        return {
+          z,
+          x,
+          w: (x / 2 ** z) * 360 - 180,
+          e: ((x + 1) / 2 ** z) * 360 - 180,
+        };
+      })
+      .filter(Boolean);
+    assert.ok(spans.length > 0, "expected tile fetches");
+    for (const s of spans) {
+      assert.ok(
+        s.w <= -170 || s.e >= 170,
+        `tile z${s.z}/x${s.x} (${s.w.toFixed(1)}..${s.e.toFixed(1)}) is far from the seam`,
+      );
+    }
+
+    // The z8 corridor covers both grid edges straddling the seam
+    const z8 = spans.filter((s) => s.z === 8);
+    assert.ok(
+      z8.some((s) => s.x <= 1),
+      "corridor tile near west edge",
+    );
+    assert.ok(
+      z8.some((s) => s.x >= 254),
+      "corridor tile near east edge",
+    );
+
+    // The overview pyramid (z0..z7) also covers both sides at z7 —
+    // the old bounds missed the tiles right at the seam
+    const z7 = spans.filter((s) => s.z === 7);
+    assert.ok(z7.length > 0, "overview z7 tiles cached");
+    assert.ok(
+      z7.some((s) => s.x <= 1),
+      "overview covers the seam's west side",
+    );
+    assert.ok(
+      z7.some((s) => s.x >= 126),
+      "overview covers the seam's east side",
+    );
+
+    // Metadata bounds: the union of the split boxes is the
+    // full-width box (single-box metadata cannot wrap the seam, and
+    // full width never blanks either side in clipping consumers)
+    const reader = new DatabaseSync(dbPath);
+    const meta = Object.fromEntries(
+      reader
+        .prepare("SELECT name, value FROM metadata")
+        .all()
+        .map((r) => [r.name, r.value]),
+    );
+    reader.close();
+    const bounds = meta.bounds.split(",").map(Number);
+    assert.equal(bounds[0], -180);
+    assert.equal(bounds[2], 180);
+    // Latitudes contain the corridor's -18..-14 band (the fresh-store
+    // "0,0,0,0" placeholder unions the north edge to the equator —
+    // pre-existing behavior, unrelated to the seam)
+    assert.ok(bounds[1] <= -17.5, "south edge covers the corridor band");
+    assert.ok(bounds[3] >= -14, "north edge covers the corridor band");
+  });
+
   test("fetch-active-route without an active route returns 404", () => {
     startWithTestHooks();
     plugin.registerWithRouter(app.router);

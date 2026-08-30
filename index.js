@@ -51,6 +51,7 @@ const {
   distanceNM,
   isValidCoordinate,
   overviewTiles,
+  unionBoxes,
 } = require("./lib/geometry.js");
 const { MbTilesStore, nodeSupportsSqlite, extentFromTilesFile } =
   require("./lib/mbtiles.js");
@@ -1947,25 +1948,25 @@ module.exports = (app) => {
     const combined = [];
     const zoomCaps = {};
     const perSourceCount = {};
-    let bounds = null;
+    let boxes = null;
     for (const source of jobSources) {
       const maxZoom = Math.min(
         geometry.maxZoom,
         source.maxZoom ?? geometry.maxZoom,
       );
       const minZoom = Math.min(geometry.minZoom, maxZoom);
-      const { tiles, bounds: tileBounds } = corridorTiles(coordinates, {
+      const { tiles, boxes: tileBoxes } = corridorTiles(coordinates, {
         ...geometry,
         minZoom,
         maxZoom,
       });
-      bounds ??= tileBounds;
+      boxes ??= tileBoxes;
       zoomCaps[source.id] = maxZoom;
       perSourceCount[source.id] = tiles.length;
       for (const tile of tiles) {
         combined.push({ ...tile, source: source.id });
       }
-      const overview = overviewTiles(bounds, minZoom - 1);
+      const overview = overviewTiles(boxes, minZoom - 1);
       perSourceCount[source.id] += overview.length;
       for (const tile of overview) {
         combined.push({ ...tile, source: source.id });
@@ -2024,7 +2025,7 @@ module.exports = (app) => {
       const priorBounds = parseBoundsMetadata(store.getMetadata("bounds"));
       const nextBounds = unionBounds(
         unionBounds(priorBounds, dataExtent?.bounds),
-        bounds,
+        unionBoxes(boxes),
       );
       if (nextBounds) store.setBounds(nextBounds);
       store.setZoomLevels(

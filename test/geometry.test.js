@@ -13,8 +13,10 @@ const {
   isValidCoordinate,
   latToTileY,
   lonToTileX,
+  overviewTiles,
   tileXToLon,
   tileYToLat,
+  unionBoxes,
   xyzToTmsY,
   STRATEGIC_MAX_ZOOM,
   TACTICAL_MAX_ZOOM,
@@ -203,7 +205,7 @@ describe("corridorTiles", () => {
   };
 
   test("single point with no margin covers just that tile per zoom", () => {
-    const { tiles, bounds } = corridorTiles([{ lat: 0, lon: 0 }], {
+    const { tiles, boxes } = corridorTiles([{ lat: 0, lon: 0 }], {
       minZoom: 0,
       maxZoom: 1,
       ...TIERS,
@@ -211,9 +213,9 @@ describe("corridorTiles", () => {
     assert.equal(tiles.length, 2);
     assert.deepEqual(tiles[0], { z: 0, x: 0, y: 0, yTms: 0 });
     assert.deepEqual(tiles[1], { z: 1, x: 1, y: 1, yTms: 0 });
-    assert.ok(bounds);
-    assert.ok(bounds[0] < 0 && bounds[2] > 0);
-    assert.ok(bounds[1] < 0 && bounds[3] > 0);
+    assert.equal(boxes.length, 1);
+    assert.ok(boxes[0][0] < 0 && boxes[0][2] > 0);
+    assert.ok(boxes[0][1] < 0 && boxes[0][3] > 0);
   });
 
   test("corridor is deduplicated and range-clamped", () => {
@@ -315,8 +317,8 @@ describe("corridorTiles", () => {
     assert.ok(approach.tiles.length >= 2);
   });
 
-  test("bounds are padded by the widest configured margin", () => {
-    const { bounds } = corridorTiles([{ lat: 0, lon: 0 }], {
+  test("bounds boxes are padded by the widest configured margin", () => {
+    const { boxes } = corridorTiles([{ lat: 0, lon: 0 }], {
       minZoom: 8,
       maxZoom: 8,
       strategicMarginNM: 60,
@@ -324,8 +326,69 @@ describe("corridorTiles", () => {
       approachRadiusNM: 3,
     });
     // 60 NM ~ 1 degree, plus the small quantization pad
-    assert.ok(bounds[1] < -1 && bounds[3] > 1);
-    assert.ok(bounds[0] < -1 && bounds[2] > 1);
+    assert.equal(boxes.length, 1);
+    assert.ok(boxes[0][1] < -1 && boxes[0][3] > 1);
+    assert.ok(boxes[0][0] < -1 && boxes[0][2] > 1);
+  });
+
+  test("a seam-crossing corridor stays seam-local: tiles, boxes, and the overview all cover both sides of 180°", () => {
+    // Westbound Samoa (171.8W) -> Fiji (178E): crosses the
+    // antimeridian going west, the naive min/max box would span the
+    // long way around the world
+    const samoa = { lat: -14.0, lon: -171.8 };
+    const fiji = { lat: -17.8, lon: 178.0 };
+    const { tiles, boxes } = corridorTiles([samoa, fiji], {
+      minZoom: 10,
+      maxZoom: 10,
+      strategicMarginNM: 50,
+      tacticalMarginNM: 15,
+      approachRadiusNM: 3,
+    });
+    // Two bounds boxes, one per side of the seam, both valid. The
+    // unwrapped span starts on the east side (Samoa unwrapped westward
+    // past -180 to Fiji-at--182), so boxes[0] is the eastern box
+    assert.equal(boxes.length, 2);
+    const [eastSide, westSide] = boxes;
+    assert.ok(
+      eastSide[0] > 170 && eastSide[2] === 180,
+      "east box hugs the seam",
+    );
+    assert.ok(
+      westSide[0] === -180 && westSide[2] < -170,
+      "west box hugs the seam",
+    );
+    // The corridor tiles straddle both edges of the tile grid
+    const xs = tiles.filter((t) => t.z === 10).map((t) => t.x);
+    assert.ok(Math.min(...xs) <= 10, "tiles near the grid's west edge");
+    assert.ok(Math.max(...xs) >= 1013, "tiles near the grid's east edge");
+    // Every interpolated track point's own tile is in the corridor
+    for (const p of interpolateRoute([samoa, fiji], 5)) {
+      const key = `10/${lonToTileX(p.lon, 10)}/${latToTileY(p.lat, 10)}`;
+      assert.ok(
+        tiles.some((t) => `${t.z}/${t.x}/${t.y}` === key),
+        `track point ${p.lat.toFixed(3)},${p.lon.toFixed(3)} uncovered`,
+      );
+    }
+    // The overview pyramid over the split boxes covers the track on
+    // BOTH sides of the seam (the old world-spanning box missed the
+    // tiles right at 180°)
+    const overview = overviewTiles(boxes, 7);
+    const overviewKeys = new Set(overview.map((t) => `${t.z}/${t.x}/${t.y}`));
+    let covered = 0;
+    for (const p of interpolateRoute([samoa, fiji], 5)) {
+      if (overviewKeys.has(`7/${lonToTileX(p.lon, 7)}/${latToTileY(p.lat, 7)}`))
+        covered++;
+    }
+    assert.equal(covered, 128, "every z7 track tile is in the overview");
+    // ...without fetching the rest of the world at those latitudes
+    // (a tile counts as far only when its FULL span is away from the
+    // seam — low-zoom tiles legitimately reach 180° from inside)
+    const farAway = overview.filter((t) => {
+      const w = tileXToLon(t.x, t.z);
+      const e = tileXToLon(t.x + 1, t.z);
+      return w > -170 && e < 170;
+    });
+    assert.equal(farAway.length, 0, "overview stays seam-local");
   });
 
   test("invalid zoom order is swapped and invalid input yields nothing", () => {
@@ -337,7 +400,7 @@ describe("corridorTiles", () => {
     assert.equal(swapped.tiles.length, 2);
     assert.deepEqual(corridorTiles([], { minZoom: 1, maxZoom: 1, ...TIERS }), {
       tiles: [],
-      bounds: null,
+      boxes: null,
     });
     assert.deepEqual(
       corridorTiles([{ lat: 999, lon: 0 }], {
@@ -364,22 +427,120 @@ describe("isValidCoordinate", () => {
 
 describe("boundsWithMargin", () => {
   test("pads the bbox by the margin and clamps to the projection", () => {
-    const bounds = boundsWithMargin([{ lat: 0, lon: 0 }], 60);
+    const boxes = boundsWithMargin([{ lat: 0, lon: 0 }], 60);
+    assert.equal(boxes.length, 1);
     // 60 NM ~ 1 degree of latitude, plus the small quantization pad
-    assert.ok(bounds[1] < -1 && bounds[3] > 1);
-    assert.ok(bounds[0] < -1 && bounds[2] > 1);
+    assert.ok(boxes[0][1] < -1 && boxes[0][3] > 1);
+    assert.ok(boxes[0][0] < -1 && boxes[0][2] > 1);
 
     const clamped = boundsWithMargin([{ lat: 85, lon: 179 }], 500);
-    assert.equal(clamped[3], 85.0511);
-    assert.equal(clamped[2], 180);
+    assert.equal(clamped[0][3], 85.0511);
+    assert.equal(clamped[0][2], 180);
+  });
+
+  test("a wide margin wrapping past the seam splits into two boxes", () => {
+    // 500 NM ~ 8.3 degrees: the padded span around lon 179 crosses 180
+    const boxes = boundsWithMargin([{ lat: 10, lon: 179 }], 500);
+    assert.equal(boxes.length, 2);
+    assert.equal(boxes[0][2], 180);
+    assert.equal(boxes[1][0], -180);
+    assert.ok(boxes[1][2] < -170);
+  });
+
+  test("westbound and eastbound seam crossings produce the same split boxes", () => {
+    const samoa = { lat: -14.0, lon: -171.8 };
+    const fiji = { lat: -17.8, lon: 178.0 };
+    const westbound = boundsWithMargin([samoa, fiji], 50);
+    const eastbound = boundsWithMargin([fiji, samoa], 50);
+    const norm = (boxes) =>
+      boxes
+        .map((b) => b.map((v) => Math.round(v * 100) / 100))
+        .sort((a, b) => a[0] - b[0]);
+    assert.deepEqual(norm(westbound), norm(eastbound));
+    // Both sides hug the seam instead of spanning the world
+    assert.equal(westbound.length, 2);
+    assert.ok(westbound[0][0] > 170 && westbound[0][2] === 180);
+    assert.ok(westbound[1][0] === -180 && westbound[1][2] < -170);
+
+    // Eastbound is fully covered too, not just bounded: every
+    // interpolated track point has its corridor tile at z10 and its
+    // overview tile at z7, and no overview tile lies far from the
+    // seam
+    const { tiles } = corridorTiles([fiji, samoa], {
+      minZoom: 10,
+      maxZoom: 10,
+      strategicMarginNM: 50,
+      tacticalMarginNM: 15,
+      approachRadiusNM: 3,
+    });
+    const corridorKeys = new Set(tiles.map((t) => `${t.z}/${t.x}/${t.y}`));
+    const overviewKeys = new Set(
+      overviewTiles(eastbound, 7).map((t) => `${t.z}/${t.x}/${t.y}`),
+    );
+    for (const p of interpolateRoute([fiji, samoa], 5)) {
+      assert.ok(
+        corridorKeys.has(
+          `10/${lonToTileX(p.lon, 10)}/${latToTileY(p.lat, 10)}`,
+        ),
+        `eastbound track point ${p.lat.toFixed(3)},${p.lon.toFixed(3)} uncovered at z10`,
+      );
+      assert.ok(
+        overviewKeys.has(`7/${lonToTileX(p.lon, 7)}/${latToTileY(p.lat, 7)}`),
+        `eastbound track point ${p.lat.toFixed(3)},${p.lon.toFixed(3)} uncovered by the overview`,
+      );
+    }
+  });
+
+  test("non-crossing routes stay a single box", () => {
+    const boxes = boundsWithMargin(
+      [
+        { lat: -18.85, lon: -159.78 },
+        { lat: -19.05, lon: -169.85 },
+      ],
+      15,
+    );
+    assert.equal(boxes.length, 1);
+    assert.ok(boxes[0][0] < -159 && boxes[0][2] > -170);
+  });
+
+  test("a span wrapping the whole globe collapses to one world box", () => {
+    // Consecutive legs each under 180°, accumulating past 360°
+    const coords = Array.from({ length: 9 }, (_, i) => ({
+      lat: 0,
+      lon: i * 90,
+    }));
+    coords.push({ lat: 0, lon: 10 }); // 10° east of the start, going around
+    const boxes = boundsWithMargin(coords, 10);
+    assert.deepEqual(boxes.length, 1);
+    assert.equal(boxes[0][0], -180);
+    assert.equal(boxes[0][2], 180);
+  });
+});
+
+describe("unionBoxes", () => {
+  test("collapses a single box to itself", () => {
+    const box = [-10, -5, 10, 5];
+    assert.deepEqual(unionBoxes([box]), box);
+  });
+
+  test("a seam-split pair unions to the full-width box metadata needs", () => {
+    const box = unionBoxes([
+      [177.1, -18.7, 180, -13.1],
+      [-180, -18.7, -171.0, -13.1],
+    ]);
+    assert.deepEqual(box, [-180, -18.7, 180, -13.1]);
+  });
+
+  test("returns null for nothing", () => {
+    assert.equal(unionBoxes(null), null);
+    assert.equal(unionBoxes([]), null);
   });
 });
 
 describe("overviewTiles (low-zoom pyramid)", () => {
-  test("covers the bounding rectangle from z0 through toZoom", () => {
-    const { overviewTiles } = require("../lib/geometry.js");
+  test("covers the bounding rectangles from z0 through toZoom", () => {
     // A ~2°x2° box around the Marquesas
-    const tiles = overviewTiles([-160.5, -10.5, -158.5, -8.5], 2);
+    const tiles = overviewTiles([[-160.5, -10.5, -158.5, -8.5]], 2);
     const byZoom = new Map();
     for (const t of tiles) {
       byZoom.set(t.z, (byZoom.get(t.z) ?? 0) + 1);
@@ -393,23 +554,35 @@ describe("overviewTiles (low-zoom pyramid)", () => {
     }
   });
 
-  test("crosses the antimeridian without wrapping", () => {
-    const { overviewTiles } = require("../lib/geometry.js");
-    // A box straddling ±180°: lonToTileX(east) < lonToTileX(west) at
-    // every zoom ≥ 1, so the x range collapses — the pyramid cannot
-    // wrap the seam, exactly like the corridor tiles it accompanies.
-    // Only the z0 world tile (which spans the seam by definition)
-    // survives.
-    const tiles = overviewTiles([179.5, -1, -179.5, 1], 3);
-    assert.deepEqual(tiles, [{ z: 0, x: 0, y: 0, yTms: 0 }]);
+  test("covers both sides of a seam-split box pair, deduped and sorted", () => {
+    // Split boxes straddling ±180°: the pyramid must cover both sides
+    // (a single box cannot wrap the seam) and dedupe the z0 world tile
+    const tiles = overviewTiles(
+      [
+        [179.5, -1, 180, 1],
+        [-180, -1, -179.5, 1],
+      ],
+      3,
+    );
+    const keys = tiles.map((t) => `${t.z}/${t.x}/${t.y}`);
+    assert.ok(keys.includes("0/0/0"), "z0 world tile spans the seam");
+    // At z3 the seam sits between x=7 (157.5E-180E) and x=0
+    // (180W-157.5W); 1N/1S rows are y=3 and y=4
+    assert.ok(keys.includes("3/7/3"), "east-side seam tile at z3");
+    assert.ok(keys.includes("3/0/3"), "west-side seam tile at z3");
+    assert.equal(new Set(keys).size, keys.length, "tiles deduped across boxes");
+    // Deterministic z-major ordering
+    const sorted = [...tiles].sort(
+      (a, b) => a.z - b.z || a.x - b.x || a.y - b.y,
+    );
+    assert.deepEqual(tiles, sorted);
   });
 
   test("degrades quietly on bad input", () => {
-    const { overviewTiles } = require("../lib/geometry.js");
     assert.deepEqual(overviewTiles(null, 7), []);
-    assert.deepEqual(overviewTiles([1, 2, 3], 7), []);
+    assert.deepEqual(overviewTiles([[1, 2, 3]], 7), []);
     // toZoom 0 → just the containing z0 tile
-    const z0 = overviewTiles([20, 60, 21, 60.5], 0);
+    const z0 = overviewTiles([[20, 60, 21, 60.5]], 0);
     assert.deepEqual(z0, [{ z: 0, x: 0, y: 0, yTms: 0 }]);
   });
 });
