@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- South and west target coordinates are now entered through
+  `N/S` and `E/W` hemisphere toggle buttons beside unsigned
+  latitude/longitude inputs: plain `type="number"` keyboards still
+  lack an accessible minus key on several mobile keyboards, so
+  negative values remained effectively untypeable. Parsing also
+  became strict full-string validation — typos like `1.2.3` are
+  rejected instead of being silently truncated to `1.2`.
+
 - The `[ Vacuum ]` button could leave the storage panel reporting an
   unchanged size even when compaction actually freed pages: in WAL
   mode VACUUM's compacted pages land in the `-wal` sidecar, and only a

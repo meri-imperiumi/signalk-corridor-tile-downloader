@@ -6,16 +6,22 @@
  * circle from the vessel to the target (or buffers a bubble around
  * the target alone when no GPS fix is available).
  *
- * The number inputs deliberately carry no `inputmode` override: the
- * compact decimal pad it selects has NO minus key on mobile keyboards,
- * making south/west coordinates untypeable. The plain `type="number"
- * keyboards (iOS numbers-and-punctuation, Android numeric pad) all
- * include a minus sign.
+ * The magnitude inputs are `type="text"` with
+ * `inputmode="decimal"` (the right mobile keypad, no `type="number"
+ * quirks) paired with hemisphere toggle buttons (`N/S`, `E/W`):
+ * the compact decimal and numeric keypads on iOS have NO minus key,
+ * and several Android keyboards hide it even in the plain
+ * numbers-and-punctuation layout, so signs are entered via the
+ * toggles and never typed (spec §7 caveat).
  *
  * @file components/target-panel.js
  */
 
-import { parseTargetCoordinate, targetLabel } from "../target.js";
+import {
+  hemisphereText,
+  parseTargetCoordinate,
+  targetLabel,
+} from "../target.js";
 import { panelCss } from "./panel.js";
 
 const API_BASE = "/plugins/signalk-corridor-tile-downloader";
@@ -38,11 +44,31 @@ class CtdTargetPanel extends HTMLElement {
           gap: 0.75rem;
           flex-wrap: wrap;
         }
+        .entry {
+          display: flex;
+          align-items: stretch;
+          gap: 0.5rem;
+        }
+        .entry input {
+          flex: 1;
+          min-width: 0;
+        }
+        /* Hemisphere toggles: bracketed [ N ]/[ S ] buttons. The
+           negative hemisphere gets the inverted (filled) look via
+           aria-pressed, mirroring the [ ON ]/[ OFF ] toggle style. */
+        button.hemi {
+          min-width: 4.25rem;
+          padding: 0 0.5rem;
+        }
+        button.hemi[aria-pressed="true"] {
+          background-color: var(--theme-color);
+          color: var(--bg-base);
+        }
         .field {
           display: flex;
           flex-direction: column;
           gap: 0.35rem;
-          min-width: 9rem;
+          min-width: 11rem;
           flex: 1;
         }
         .field label {
@@ -98,13 +124,21 @@ class CtdTargetPanel extends HTMLElement {
         <div class="row">
           <div class="field">
             <label for="lat">Latitude</label>
-            <input id="lat" type="number" step="any" min="-90" max="90"
-                   placeholder="-90 … 90" autocomplete="off" />
+            <div class="entry">
+              <input id="lat" type="text" inputmode="decimal"
+                     placeholder="0 … 90" autocomplete="off" />
+              <button id="latHemi" class="hemi" type="button"
+                      aria-pressed="false" title="Toggle N/S hemisphere">[ N ]</button>
+            </div>
           </div>
           <div class="field">
             <label for="lon">Longitude</label>
-            <input id="lon" type="number" step="any" min="-180" max="180"
-                   placeholder="-180 … 180" autocomplete="off" />
+            <div class="entry">
+              <input id="lon" type="text" inputmode="decimal"
+                     placeholder="0 … 180" autocomplete="off" />
+              <button id="lonHemi" class="hemi" type="button"
+                      aria-pressed="false" title="Toggle E/W hemisphere">[ E ]</button>
+            </div>
           </div>
           <button id="fetch">[ Fetch target ]</button>
         </div>
@@ -116,6 +150,10 @@ class CtdTargetPanel extends HTMLElement {
     /** @type {HTMLInputElement} */
     this.lonEl = shadow.getElementById("lon");
     /** @type {HTMLButtonElement} */
+    this.latHemiEl = shadow.getElementById("latHemi");
+    /** @type {HTMLButtonElement} */
+    this.lonHemiEl = shadow.getElementById("lonHemi");
+    /** @type {HTMLButtonElement} */
     this.fetchEl = shadow.getElementById("fetch");
     /** @type {HTMLElement} */
     this.resultEl = shadow.getElementById("result");
@@ -125,6 +163,12 @@ class CtdTargetPanel extends HTMLElement {
     this.metered = false;
 
     this.fetchEl.addEventListener("click", () => this.fetchTarget());
+    this.latHemiEl.addEventListener("click", () =>
+      this.toggleHemisphere(this.latHemiEl, "N", "S"),
+    );
+    this.lonHemiEl.addEventListener("click", () =>
+      this.toggleHemisphere(this.lonHemiEl, "E", "W"),
+    );
     this.latEl.addEventListener("keydown", (e) => {
       if (e.key === "Enter") this.fetchTarget();
     });
@@ -142,15 +186,40 @@ class CtdTargetPanel extends HTMLElement {
     this.fetchEl.disabled = this._busy;
     this.latEl.disabled = this._busy;
     this.lonEl.disabled = this._busy;
+    this.latHemiEl.disabled = this._busy;
+    this.lonHemiEl.disabled = this._busy;
+  }
+
+  /**
+   * Flips a hemisphere toggle between its positive (N/E) and
+   * negative (S/W) label.
+   *
+   * @param {HTMLButtonElement} btn
+   * @param {string} positive
+   * @param {string} negative
+   */
+  toggleHemisphere(btn, positive, negative) {
+    const isNegative = btn.getAttribute("aria-pressed") !== "true";
+    btn.setAttribute("aria-pressed", String(isNegative));
+    btn.textContent = `[ ${isNegative ? negative : positive} ]`;
   }
 
   /** Reads, validates, and uploads the entered coordinate. */
   async fetchTarget() {
     if (this._busy) return;
-    const coord = parseTargetCoordinate(this.latEl.value, this.lonEl.value);
+    const coord = parseTargetCoordinate(
+      hemisphereText(
+        this.latEl.value,
+        this.latHemiEl.getAttribute("aria-pressed") === "true",
+      ),
+      hemisphereText(
+        this.lonEl.value,
+        this.lonHemiEl.getAttribute("aria-pressed") === "true",
+      ),
+    );
     if (!coord) {
       this.showResult(
-        "Enter a valid latitude (-90…90) and longitude (-180…180)",
+        "Enter a valid latitude (0…90) and longitude (0…180)",
         true,
       );
       return;

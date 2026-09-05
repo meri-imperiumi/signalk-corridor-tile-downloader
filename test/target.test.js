@@ -1,7 +1,11 @@
 const { describe, test } = require("node:test");
 const assert = require("node:assert/strict");
 
-const { parseTargetCoordinate, targetLabel } = require("../public/target.js");
+const {
+  hemisphereText,
+  parseTargetCoordinate,
+  targetLabel,
+} = require("../public/target.js");
 
 describe("parseTargetCoordinate", () => {
   test("parses valid decimal coordinates", () => {
@@ -47,6 +51,49 @@ describe("parseTargetCoordinate", () => {
     assert.equal(parseTargetCoordinate("NaN", "24.94"), null);
     assert.equal(parseTargetCoordinate(null, "24.94"), null);
     assert.equal(parseTargetCoordinate(undefined, undefined), null);
+  });
+
+  test("rejects partial parses and stray characters instead of truncating", () => {
+    // parseFloat would silently accept these as truncated numbers,
+    // targeting the wrong point on the chart
+    assert.equal(parseTargetCoordinate("1.2.3", "24.94"), null);
+    assert.equal(parseTargetCoordinate("60.17abc", "24.94"), null);
+    assert.equal(parseTargetCoordinate("60,17", "24.94"), null);
+    assert.equal(parseTargetCoordinate("60.17 ", "24 94"), null);
+  });
+
+  test("accepts exponent-free decimals in every plain shape", () => {
+    assert.deepEqual(parseTargetCoordinate(".5", ".75"), {
+      lat: 0.5,
+      lon: 0.75,
+    });
+    assert.deepEqual(parseTargetCoordinate("60.", "24."), {
+      lat: 60,
+      lon: 24,
+    });
+    assert.deepEqual(parseTargetCoordinate("+60.17", "+24.94"), {
+      lat: 60.17,
+      lon: 24.94,
+    });
+    assert.equal(parseTargetCoordinate("1e2", "0"), null);
+  });
+});
+
+describe("hemisphereText", () => {
+  test("combines an unsigned magnitude with the hemisphere toggle", () => {
+    assert.equal(hemisphereText("18.85", true), "-18.85");
+    assert.equal(hemisphereText(" 24.94 ", false), "24.94");
+    assert.equal(hemisphereText(" 159.78 ", true), "-159.78");
+  });
+
+  test("feeds parseTargetCoordinate from the toggled inputs", () => {
+    assert.deepEqual(
+      parseTargetCoordinate(
+        hemisphereText("18.85", true),
+        hemisphereText("159.78", true),
+      ),
+      { lat: -18.85, lon: -159.78 },
+    );
   });
 });
 
