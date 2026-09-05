@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The `[ Vacuum ]` button could leave the storage panel reporting an
+  unchanged size even when compaction actually freed pages: in WAL
+  mode VACUUM's compacted pages land in the `-wal` sidecar, and only a
+  truncating checkpoint shrinks the main `.mbtiles` file whose size
+  the panel reports. `vacuum()` now runs a best-effort
+  `wal_checkpoint(TRUNCATE)` after `VACUUM`, matching `clear()`.
+
 ## [0.5.0] - 2026-09-05
 
 ### Fixed

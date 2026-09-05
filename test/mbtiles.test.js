@@ -192,12 +192,28 @@ describe("MbTilesStore", () => {
 
   test("vacuum reclaims space without losing tiles", () => {
     const store = new MbTilesStore(dbPath);
-    store.insertTile(8, 1, 1, Buffer.alloc(4096, 7));
+    for (let i = 0; i < 64; i++) {
+      store.insertTile(8, i, i, Buffer.alloc(4096, i % 256));
+    }
+    // insertTile never deletes, so free pages (the only thing VACUUM
+    // reclaims) come from dropping rows directly.
+    store.db.exec("DELETE FROM tiles WHERE tile_column < 32;");
     const sizeBefore = store.sizeBytes();
+    assert.ok(sizeBefore > 40000, "fixture did not fill the database");
+
     store.vacuum();
-    assert.ok(store.hasTile(8, 1, 1));
-    assert.ok(store.sizeBytes() > 0);
-    assert.ok(sizeBefore > 0);
+
+    for (let i = 32; i < 64; i++) {
+      assert.ok(store.hasTile(8, i, i), `tile ${i} lost in vacuum`);
+    }
+    assert.equal(store.hasTile(8, 0, 0), false);
+    // In WAL mode VACUUM's compacted pages land in the -wal sidecar;
+    // without a truncating checkpoint the main file keeps its size and
+    // the storage panel shows the pre-vacuum figure.
+    assert.ok(
+      store.sizeBytes() < sizeBefore,
+      "vacuum did not shrink the main database file",
+    );
     store.close();
   });
 
