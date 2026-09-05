@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Bracket buttons (`[ OFF ]`, `[ Vacuum ]`, …) no longer line-wrap
+  at their inner spaces on narrow panels, which rendered them as
+  `[` / `off` / `]` stacked lines. The shared button style in
+  `components/panel.js` now sets `white-space: nowrap`.
+
+- The target-coordinate inputs no longer force `inputmode="decimal"`:
+  the compact decimal keypad it selects has no minus key on mobile,
+  making south/west (negative) latitudes and longitudes untypeable.
+  With the plain `type="number"` keyboard, both iOS and Android show
+  a minus sign.
+
+### Added
+
+- "Clear cache" button (and `POST /clear-cache`) that deletes every
+  cached tile from all MBTiles stores and VACUUMs the files, actually
+  reclaiming the disk space. The old single "[ Vacuum / free space ]"
+  button only compacted free pages — with a live 700 MB of tiles it
+  freed nothing; it is now labeled "[ Vacuum ]" and the destructive
+  clear is a separate guarded trigger. Clearing also discards a stale
+  restart journal so a resumed job cannot skip tiles it recorded as
+  completed against the wiped cache.
+
 ## [0.4.0] - 2026-08-29
 
 ### Fixed

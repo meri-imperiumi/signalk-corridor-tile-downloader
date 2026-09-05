@@ -6,6 +6,12 @@
  * circle from the vessel to the target (or buffers a bubble around
  * the target alone when no GPS fix is available).
  *
+ * The number inputs deliberately carry no `inputmode` override: the
+ * compact decimal pad it selects has NO minus key on mobile keyboards,
+ * making south/west coordinates untypeable. The plain `type="number"
+ * keyboards (iOS numbers-and-punctuation, Android numeric pad) all
+ * include a minus sign.
+ *
  * @file components/target-panel.js
  */
 
@@ -93,12 +99,12 @@ class CtdTargetPanel extends HTMLElement {
           <div class="field">
             <label for="lat">Latitude</label>
             <input id="lat" type="number" step="any" min="-90" max="90"
-                   placeholder="-90 … 90" inputmode="decimal" autocomplete="off" />
+                   placeholder="-90 … 90" autocomplete="off" />
           </div>
           <div class="field">
             <label for="lon">Longitude</label>
             <input id="lon" type="number" step="any" min="-180" max="180"
-                   placeholder="-180 … 180" inputmode="decimal" autocomplete="off" />
+                   placeholder="-180 … 180" autocomplete="off" />
           </div>
           <button id="fetch">[ Fetch target ]</button>
         </div>

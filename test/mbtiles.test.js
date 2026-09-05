@@ -200,6 +200,35 @@ describe("MbTilesStore", () => {
     assert.ok(sizeBefore > 0);
     store.close();
   });
+
+  test("clear removes every tile and reclaims the disk space", () => {
+    const store = new MbTilesStore(dbPath);
+    for (let i = 0; i < CHECKPOINT_INTERVAL * 2; i++) {
+      store.insertTile(8, i, i, Buffer.alloc(2048, i % 256));
+    }
+    store.setFormat("pbf");
+    store.setBounds([10, 20, 30, 40]);
+    store.setZoomLevels(8, 12);
+    const filled = store.sizeBytes();
+    assert.ok(filled > 40000, "fixture did not fill the database");
+
+    store.clear();
+
+    assert.equal(store.hasAnyTile(), false);
+    assert.equal(store.hasTile(8, 0, 0), false);
+    assert.equal(store.getMetadata("bounds"), "0,0,0,0");
+    assert.equal(store.getMetadata("minzoom"), null);
+    assert.equal(store.getMetadata("maxzoom"), null);
+    // The format row must survive: it still has to match the
+    // configured tile format when the cache refills.
+    assert.equal(store.getMetadata("format"), "pbf");
+    // VACUUM truncates the file back to the schema-only baseline.
+    assert.ok(store.sizeBytes() < filled / 10, "clear did not reclaim space");
+    // The store stays usable for a refill.
+    store.insertTile(9, 1, 1, Buffer.from([1, 2, 3]));
+    assert.ok(store.hasTile(9, 1, 1));
+    store.close();
+  });
 });
 
 describe("MbTilesStore WAL sidecar self-healing", () => {

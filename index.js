@@ -30,6 +30,7 @@
  *   POST /fetch-target                 corridor for a posted coordinate list
  *   POST /cancel                       abort the running job
  *   POST /vacuum                       VACUUM every mbtiles database
+ *   POST /clear-cache                  drop every cached tile + reclaim disk
  *   GET  /assets/manifest.json         mirror discovery contract
  *   GET  /assets/style.json            URL-rewritten copy of the mirrored style
  *   GET  /assets/style-ol.json         OpenLayers variant (unrenderable layers dropped)
@@ -2461,6 +2462,34 @@ module.exports = (app) => {
         }
         releaseStoresIfIdle();
         res.json({ status: "vacuum_complete" });
+      } catch (err) {
+        errorResponse(res, err);
+      }
+    });
+
+    router.post("/clear-cache", (_req, res) => {
+      if (downloader?.status().isDownloading) {
+        res.status(409).json({
+          message: "Cannot clear the cache while a download is in progress",
+        });
+        return;
+      }
+      try {
+        for (const source of activeSourceConfigs()) {
+          ensureStoreFor(source).clear();
+        }
+        releaseStoresIfIdle();
+        // A stale restart journal would resume a job against an empty
+        // cache and skip the tiles it recorded as completed.
+        clearPendingJob();
+        // Mirror what job settlement does, in reverse: rescan the
+        // consumer's (now empty) chart files and push the chart
+        // resource's disappearance to subscribed clients, instead of
+        // letting them blank-render stale bounds until some later job
+        // settles.
+        notifyChartsProvider();
+        emitStyleChartDelta();
+        res.json({ status: "cache_cleared" });
       } catch (err) {
         errorResponse(res, err);
       }

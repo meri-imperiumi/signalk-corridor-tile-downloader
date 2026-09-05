@@ -920,6 +920,10 @@ describe("plugin", () => {
     route(app, "post", "/vacuum")({}, vacuum);
     assert.equal(vacuum.statusCode, 409);
 
+    const clear = makeRes();
+    route(app, "post", "/clear-cache")({}, clear);
+    assert.equal(clear.statusCode, 409);
+
     const cancelled = makeRes();
     route(app, "post", "/cancel")({}, cancelled);
     assert.equal(cancelled.statusCode, 200);
@@ -940,6 +944,43 @@ describe("plugin", () => {
     route(app, "post", "/vacuum")({}, res);
     assert.equal(res.statusCode, 200);
     assert.equal(res.body.status, "vacuum_complete");
+  });
+
+  test("clear-cache wipes tiles, reclaims disk, and drops the journal", () => {
+    startWithTestHooks();
+    plugin.registerWithRouter(app.router);
+
+    // Seed the cache with real tile data so the clear has something to
+    // reclaim, plus a stale restart journal it must discard.
+    const store = new MbTilesStore(dbPath);
+    for (let i = 0; i < 80; i++) {
+      store.insertTile(8, i, i, Buffer.alloc(2048, i % 256));
+    }
+    const filled = store.sizeBytes();
+    store.close();
+    fs.mkdirSync(app.dataDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(app.dataDir, pluginFactory.PENDING_JOB_FILENAME),
+      "{}\n",
+    );
+
+    const res = makeRes();
+    route(app, "post", "/clear-cache")({}, res);
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.status, "cache_cleared");
+
+    const reader = new DatabaseSync(dbPath);
+    const tiles = reader.prepare("SELECT COUNT(*) AS n FROM tiles").get().n;
+    reader.close();
+    assert.equal(tiles, 0);
+    assert.ok(
+      fs.statSync(dbPath).size < filled / 10,
+      "clear-cache did not reclaim disk space",
+    );
+
+    const status = makeRes();
+    route(app, "get", "/status")({}, status);
+    assert.equal(status.body.resumable, false);
   });
 
   test("fetches from the selected provider's URL (Addendum 6)", async () => {

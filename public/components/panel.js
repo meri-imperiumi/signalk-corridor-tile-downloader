@@ -106,10 +106,14 @@ const panelCss = (extra = "") => `
   .error { color: var(--color-red); }
 
   /* Hardware-style bracket buttons (spec §7): transparent, 1px theme
-     border, inverted on hover/active, 48px touch targets. */
+     border, inverted on hover/active, 48px touch targets. The label
+     never wraps: a bracket label split across lines ("[\noff\n]")
+     reads as garbage, and narrow mobile panels would otherwise fold
+     at every space. */
   button {
     appearance: none;
     -webkit-appearance: none;
+    white-space: nowrap;
     font-family: ui-monospace, "Fira Code", monospace;
     font-size: 0.9rem;
     text-transform: uppercase;

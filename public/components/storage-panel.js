@@ -1,7 +1,7 @@
 /**
  * Database storage management panel (spec §8B): shows the on-disk size
- * of the MBTiles cache and offers a VACUUM trigger guarded by a
- * confirm() dialog.
+ * of the MBTiles cache and offers a VACUUM trigger (compaction) plus a
+ * full cache clear, both guarded by a confirm() dialog.
  *
  * @file components/storage-panel.js
  */
@@ -31,6 +31,12 @@ class CtdStoragePanel extends HTMLElement {
           color: var(--text-main);
           font-variant-numeric: tabular-nums;
         }
+        .actions {
+          display: flex;
+          align-items: center;
+          gap: 0.75rem;
+          flex-wrap: wrap;
+        }
         .path {
           font-family: ui-monospace, "Fira Code", monospace;
           font-size: 0.75rem;
@@ -51,7 +57,10 @@ class CtdStoragePanel extends HTMLElement {
         <h2 class="label">Cache storage</h2>
         <div class="row">
           <span class="size" id="size">—</span>
-          <button id="vacuum">[ Vacuum / free space ]</button>
+          <div class="actions">
+            <button id="vacuum">[ Vacuum ]</button>
+            <button id="clear">[ Clear cache ]</button>
+          </div>
         </div>
         <div class="path" id="path"></div>
         <div class="result" id="result"></div>
@@ -63,11 +72,14 @@ class CtdStoragePanel extends HTMLElement {
     this.pathEl = shadow.getElementById("path");
     /** @type {HTMLButtonElement} */
     this.vacuumEl = shadow.getElementById("vacuum");
+    /** @type {HTMLButtonElement} */
+    this.clearEl = shadow.getElementById("clear");
     /** @type {HTMLElement} */
     this.resultEl = shadow.getElementById("result");
 
     this._busy = false;
     this.vacuumEl.addEventListener("click", () => this.vacuum());
+    this.clearEl.addEventListener("click", () => this.clearCache());
   }
 
   /** @param {object} status */
@@ -75,6 +87,7 @@ class CtdStoragePanel extends HTMLElement {
     if (!status) return;
     this._busy = status.isDownloading === true;
     this.vacuumEl.disabled = this._busy;
+    this.clearEl.disabled = this._busy;
     this.sizeEl.textContent = formatSI(totalDbSize(status.dbSizeBytes), "B");
     this.pathEl.textContent = storageLabel(status.outputPaths);
   }
@@ -106,6 +119,38 @@ class CtdStoragePanel extends HTMLElement {
       this.showResult(`Vacuum failed: ${e.message}`, true);
     } finally {
       this.vacuumEl.disabled = this._busy;
+    }
+  }
+
+  /** Drops every cached tile and reclaims the disk space. */
+  async clearCache() {
+    if (this._busy) return;
+    if (
+      !window.confirm(
+        "Delete ALL cached tiles? Offline charts are gone until the next corridor fetch. This cannot be undone.",
+      )
+    ) {
+      return;
+    }
+    this.vacuumEl.disabled = true;
+    this.clearEl.disabled = true;
+    this.showResult("Clearing cache…");
+    try {
+      const res = await fetch(`${API_BASE}/clear-cache`, { method: "POST" });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        this.showResult(body.message || `HTTP ${res.status}`, true);
+      } else {
+        this.showResult("Cache cleared");
+        this.dispatchEvent(
+          new CustomEvent("ctd:refresh", { bubbles: true, composed: true }),
+        );
+      }
+    } catch (e) {
+      this.showResult(`Clear failed: ${e.message}`, true);
+    } finally {
+      this.vacuumEl.disabled = this._busy;
+      this.clearEl.disabled = this._busy;
     }
   }
 
