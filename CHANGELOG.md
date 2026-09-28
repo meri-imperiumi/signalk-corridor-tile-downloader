@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- "Fetch active route" now finds routes activated through the Signal K
+  Course API (Freeboard-SK style, e.g. via signalk-orca-route-provider).
+  Two discovery assumptions had broken: the active route lives in the
+  course provider's internal state (published to clients as deltas —
+  the self tree only carries the legacy
+  `courseGreatCircle.activeRoute.href` path, not
+  `navigation.course.activeRoute.href`), and provider-served route
+  resources are kept out of the server's full model cache per the v2
+  resources contract, so `app.getPath('resources.routes.<id>')` cannot
+  see them either. The route is now resolved via `app.getCourse()` for
+  the href (self-tree fallback kept) and
+  `app.resourcesApi.getResource('routes', id)` for the geometry (model
+  cache fallback kept). Verified against a live server: the Orca route
+  resolves and the corridor job starts.
+
+- The webapp now shows the active route name as soon as it loads (and
+  when the course changes), instead of only after a corridor job has
+  been started. The plugin resolves the name at start, tracks course
+  href deltas, and `/status` reports it as `activeRouteName`. A custom
+  target job no longer claims an active route name — that field now
+  means exactly the course's active route.
+
 ## [0.5.1] - 2026-09-05
 
 ### Fixed

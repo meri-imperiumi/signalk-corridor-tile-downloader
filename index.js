@@ -591,7 +591,10 @@ module.exports = (app) => {
   /** @type {Map<string, MbTilesStore>} Open stores by source id. */
   const stores = new Map();
   let downloader = null;
-  let lastRouteName = null;
+  /** Name of the currently active route, resolved from the course.
+   * Updated at start (persisted course), on course href deltas, and
+   * when a corridor job starts. */
+  let activeRouteName = null;
   let config = null;
   /** Last position the recovery cache was verified against. */
   let lastCheckedPosition = null;
@@ -771,6 +774,10 @@ module.exports = (app) => {
       registerChartsResourceProvider();
 
       subscribeToDeltas();
+
+      // A course persisted by a previous run is active from the start:
+      // resolve its name without waiting for a course delta.
+      refreshActiveRouteName();
 
       // Crash-safe resume: restart any passage job journaled before
       // the last shutdown.
@@ -1462,9 +1469,11 @@ module.exports = (app) => {
   // ------------------------------------------------------------------
 
   /**
-   * Subscribes to `navigation.position` (JIT recovery triggers) and
+   * Subscribes to `navigation.position` (JIT recovery triggers),
    * `network.internet.state` (immediate wake on connectivity
-   * transitions, SPEC Addendum 5).
+   * transitions, SPEC Addendum 5), and the active route href (the
+   * course provider publishes route changes as deltas — the course
+   * REST tree only carries the legacy courseGreatCircle path).
    */
   function subscribeToDeltas() {
     if (!app.subscriptionmanager?.subscribe) return;
@@ -1473,6 +1482,10 @@ module.exports = (app) => {
       subscribe: [
         { path: "navigation.position", policy: "instant" },
         { path: "network.internet.state", policy: "instant" },
+        {
+          path: "navigation.courseGreatCircle.activeRoute.href",
+          policy: "instant",
+        },
       ],
     };
     app.subscriptionmanager.subscribe(
@@ -1500,6 +1513,12 @@ module.exports = (app) => {
           // Wake the loop immediately on a connectivity transition
           // instead of waiting out the 10 s suspend poll.
           downloader?.wake();
+        } else if (
+          value.path === "navigation.courseGreatCircle.activeRoute.href"
+        ) {
+          // Route activated, switched, or cleared — re-resolve the
+          // display name from the course state.
+          refreshActiveRouteName();
         }
       }
     }
@@ -1825,23 +1844,59 @@ module.exports = (app) => {
   /**
    * Resolves the currently active route from the Signal K tree.
    *
-   * @returns {{coordinates: Array<{lat: number, lon: number}>, name: string}|null}
+   * The route geometry named by `navigation.course.activeRoute.href`
+   * can live in two places: served by a registered resource provider
+   * under the v2 resources contract (Freeboard-SK style — provider
+   * resources are kept out of the server's full model cache, so
+   * `app.getPath` cannot see them), or held in the full model by the
+   * server itself (routes stored through the v1 REST API). The
+   * resources API is queried first; the model cache is the fallback.
+   *
+   * @returns {Promise<{coordinates: Array<{lat: number, lon: number}>, name: string}|null>}
    */
-  function getActiveRoute() {
-    const hrefNode = app.getSelfPath?.("navigation.course.activeRoute.href");
-    const href =
-      typeof hrefNode === "object" && hrefNode !== null
-        ? hrefNode.value
-        : hrefNode;
+  async function getActiveRoute() {
+    // The Course API owns the active route: it lives in the course
+    // provider's internal state and reaches clients as deltas — on
+    // current servers the self tree only carries it under the legacy
+    // courseGreatCircle/courseRhumbline paths, so getCourse() is the
+    // reliable in-process source. The new-style self-tree path stays
+    // as the fallback for setups that write the course directly.
+    let href = null;
+    if (typeof app.getCourse === "function") {
+      try {
+        const course = await app.getCourse();
+        href = course?.activeRoute?.href ?? null;
+      } catch {
+        // Course API unavailable — fall through to the self tree.
+      }
+    }
+    if (typeof href !== "string" || href === "") {
+      const hrefNode = app.getSelfPath?.("navigation.course.activeRoute.href");
+      href =
+        typeof hrefNode === "object" && hrefNode !== null
+          ? hrefNode.value
+          : hrefNode;
+    }
     if (typeof href !== "string" || href === "") return null;
 
     const id = decodeURIComponent(href.split("/").filter(Boolean).pop() || "");
     if (!id) return null;
 
-    const node = app.getPath?.(`resources.routes.${id}`);
+    let resource = null;
+    if (typeof app.resourcesApi?.getResource === "function") {
+      try {
+        resource = await app.resourcesApi.getResource("routes", id);
+      } catch {
+        // Provider has no such route — fall through to the model cache.
+      }
+    }
+    if (!resource) {
+      const node = app.getPath?.(`resources.routes.${id}`);
+      resource = node && typeof node === "object" ? (node.value ?? node) : null;
+    }
     const feature =
-      node && typeof node === "object"
-        ? (node.value ?? node.feature ?? node)
+      resource && typeof resource === "object"
+        ? (resource.feature ?? resource)
         : null;
     const rawCoordinates = feature?.geometry?.coordinates;
     if (!Array.isArray(rawCoordinates)) return null;
@@ -1859,8 +1914,25 @@ module.exports = (app) => {
       );
     if (coordinates.length === 0) return null;
 
-    const name = feature?.properties?.name || id || "Active route";
+    const name =
+      resource?.name || feature?.properties?.name || id || "Active route";
     return { coordinates, name };
+  }
+
+  /**
+   * Re-resolves the active route's display name from the course state.
+   * Clears the name when no route is active. Failures keep the last
+   * known name — the next course delta retries.
+   *
+   * @returns {Promise<void>}
+   */
+  async function refreshActiveRouteName() {
+    try {
+      const route = await getActiveRoute();
+      activeRouteName = route ? route.name : null;
+    } catch {
+      // Transient resolution failure — keep the previous name.
+    }
   }
 
   // ------------------------------------------------------------------
@@ -2086,7 +2158,6 @@ module.exports = (app) => {
       assets,
       onAssetResult,
     });
-    lastRouteName = routeName;
     return { totalTiles: pending.length };
   }
 
@@ -2379,7 +2450,7 @@ module.exports = (app) => {
       res.json({
         ...s,
         bySource,
-        activeRouteName: lastRouteName,
+        activeRouteName,
         tileProvider: config ? config.tileProvider : null,
         format: config ? config.format : null,
         outputPaths,
@@ -2389,10 +2460,10 @@ module.exports = (app) => {
       });
     });
 
-    router.post("/fetch-active-route", (req, res) => {
+    router.post("/fetch-active-route", async (req, res) => {
       try {
         const body = parseBody(req);
-        const route = getActiveRoute();
+        const route = await getActiveRoute();
         if (!route) {
           throw httpError(404, "No active route found");
         }

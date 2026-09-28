@@ -34,7 +34,7 @@ function createMockApp() {
       this.routes.push({ method: "put", path: pathName, handler });
     },
   };
-  return {
+  const app = {
     debug: () => {},
     error: () => {},
     setPluginStatus: (s) => {
@@ -61,12 +61,29 @@ function createMockApp() {
     getPath(p) {
       return this.pathTree[p];
     },
+    /** Course API state — mirrors app.getCourse() on the server. */
+    courseInfo: null,
+    getCourse() {
+      return Promise.resolve(this.courseInfo);
+    },
+    /** v2 resources API — provider-served resources, keyed "routes.<id>". */
+    providedResources: new Map(),
+    resourcesApi: {
+      async getResource(type, id) {
+        const key = `${type}.${id}`;
+        if (!app.providedResources.has(key)) {
+          throw new Error(`No ${key} resource`);
+        }
+        return app.providedResources.get(key);
+      },
+    },
     router,
     dataDir: null,
     getDataDirPath() {
       return this.dataDir;
     },
   };
+  return app;
 }
 
 function makeRes() {
@@ -413,12 +430,17 @@ describe("plugin", () => {
     plugin.registerWithRouter(app.router);
 
     // Addendum 5 wiring: position (recovery triggers) + internet state
-    // (immediate wake) subscriptions
+    // (immediate wake) subscriptions, plus the active route href (the
+    // course provider publishes route changes as deltas)
     const subscription = app.getSubscriptions()[0];
     assert.ok(subscription);
     assert.deepEqual(
       subscription.subscribe.map((s) => s.path),
-      ["navigation.position", "network.internet.state"],
+      [
+        "navigation.position",
+        "network.internet.state",
+        "navigation.courseGreatCircle.activeRoute.href",
+      ],
     );
 
     const res = makeRes();
@@ -562,7 +584,10 @@ describe("plugin", () => {
     assert.equal(s.body.isDownloading, false);
     assert.equal(s.body.failed, 0);
     assert.equal(s.body.completed, res.body.totalTiles);
-    assert.equal(s.body.activeRouteName, "Custom target");
+    // activeRouteName tracks the course's active route — a custom
+    // target job must not claim one (the job name lives in the
+    // journal/metadata handoff instead)
+    assert.equal(s.body.activeRouteName, null);
     assert.ok(s.body.dbSizeBytes.seamap > 0);
 
     // Tiles really landed in the file, readable by a concurrent
@@ -817,12 +842,12 @@ describe("plugin", () => {
     assert.ok(bounds[3] >= -14, "north edge covers the corridor band");
   });
 
-  test("fetch-active-route without an active route returns 404", () => {
+  test("fetch-active-route without an active route returns 404", async () => {
     startWithTestHooks();
     plugin.registerWithRouter(app.router);
 
     const res = makeRes();
-    route(app, "post", "/fetch-active-route")({}, res);
+    await route(app, "post", "/fetch-active-route")({}, res);
     assert.equal(res.statusCode, 404);
     assert.ok(res.body.message);
   });
@@ -845,7 +870,7 @@ describe("plugin", () => {
     plugin.registerWithRouter(app.router);
 
     const res = makeRes();
-    route(app, "post", "/fetch-active-route")({}, res);
+    await route(app, "post", "/fetch-active-route")({}, res);
     assert.equal(res.statusCode, 200);
     assert.equal(res.body.status, "started");
 
@@ -872,6 +897,199 @@ describe("plugin", () => {
     const bounds = meta.bounds.split(",").map(Number);
     assert.ok(bounds[0] < -159 && bounds[2] > -170);
     assert.ok(bounds[1] < -18 && bounds[3] > -19.2);
+  });
+
+  test("fetch-active-route resolves provider-served routes via the resources API", async () => {
+    // Resource-provider backend (e.g. signalk-orca-route-provider): the
+    // route lives behind resourcesApi, kept out of the server's full
+    // model cache per the v2 resources contract — getPath cannot see
+    // it. The course comes from the Course API: the active route lives
+    // in the course provider's state, not in the self tree.
+    app.courseInfo = {
+      activeRoute: {
+        href: "/resources/routes/31f1ea06-5efa-4e00-b9c8-8d08e16a40f9",
+        name: "Orca route",
+      },
+    };
+    app.providedResources.set("routes.31f1ea06-5efa-4e00-b9c8-8d08e16a40f9", {
+      name: "Orca route",
+      feature: {
+        type: "Feature",
+        geometry: {
+          type: "LineString",
+          coordinates: [
+            [-173.982003, -18.658217],
+            [-178.915014, -23.655453],
+          ],
+        },
+        properties: {},
+      },
+    });
+    startWithTestHooks();
+    plugin.registerWithRouter(app.router);
+
+    const res = makeRes();
+    await route(app, "post", "/fetch-active-route")({}, res);
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.status, "started");
+
+    await waitUntil(() => {
+      const s = makeRes();
+      route(app, "get", "/status")({}, s);
+      return s.body.state === "completed";
+    });
+    const s = makeRes();
+    route(app, "get", "/status")({}, s);
+    assert.equal(s.body.activeRouteName, "Orca route");
+  });
+
+  test("status reports the active route before any job runs", async () => {
+    // The course was activated before (or without) this plugin — the
+    // webapp must show it on load, not only after a corridor fetch.
+    app.courseInfo = {
+      activeRoute: {
+        href: "/resources/routes/31f1ea06-5efa-4e00-b9c8-8d08e16a40f9",
+      },
+    };
+    app.providedResources.set("routes.31f1ea06-5efa-4e00-b9c8-8d08e16a40f9", {
+      name: "Orca route",
+      feature: {
+        type: "Feature",
+        geometry: {
+          type: "LineString",
+          coordinates: [
+            [-173.982003, -18.658217],
+            [-178.915014, -23.655453],
+          ],
+        },
+        properties: {},
+      },
+    });
+    startWithTestHooks();
+    plugin.registerWithRouter(app.router);
+
+    // start() kicks off the initial name resolution — let it settle.
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const s = makeRes();
+    route(app, "get", "/status")({}, s);
+    assert.equal(s.body.activeRouteName, "Orca route");
+  });
+
+  test("status follows course deltas as the active route changes", async () => {
+    startWithTestHooks();
+    plugin.registerWithRouter(app.router);
+
+    app.courseInfo = {
+      activeRoute: {
+        href: "/resources/routes/31f1ea06-5efa-4e00-b9c8-8d08e16a40f9",
+      },
+    };
+    app.providedResources.set("routes.31f1ea06-5efa-4e00-b9c8-8d08e16a40f9", {
+      name: "Orca route",
+      feature: {
+        type: "Feature",
+        geometry: {
+          type: "LineString",
+          coordinates: [
+            [-173.982003, -18.658217],
+            [-178.915014, -23.655453],
+          ],
+        },
+        properties: {},
+      },
+    });
+
+    // The course provider publishes route changes as a delta on the
+    // legacy self-tree path the server keeps in its model.
+    const handler = app.getDeltaHandlers()[0];
+    handler({
+      updates: [
+        {
+          values: [
+            {
+              path: "navigation.courseGreatCircle.activeRoute.href",
+              value: "/resources/routes/31f1ea06-5efa-4e00-b9c8-8d08e16a40f9",
+            },
+          ],
+        },
+      ],
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const s = makeRes();
+    route(app, "get", "/status")({}, s);
+    assert.equal(s.body.activeRouteName, "Orca route");
+  });
+
+  test("status clears the route name when the course is cleared", async () => {
+    app.courseInfo = {
+      activeRoute: {
+        href: "/resources/routes/31f1ea06-5efa-4e00-b9c8-8d08e16a40f9",
+      },
+    };
+    app.providedResources.set("routes.31f1ea06-5efa-4e00-b9c8-8d08e16a40f9", {
+      name: "Orca route",
+      feature: {
+        type: "Feature",
+        geometry: {
+          type: "LineString",
+          coordinates: [
+            [-173.982003, -18.658217],
+            [-178.915014, -23.655453],
+          ],
+        },
+        properties: {},
+      },
+    });
+    startWithTestHooks();
+    plugin.registerWithRouter(app.router);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const handler = app.getDeltaHandlers()[0];
+    app.courseInfo = { activeRoute: null };
+    handler({
+      updates: [
+        {
+          values: [
+            {
+              path: "navigation.courseGreatCircle.activeRoute.href",
+              value: null,
+            },
+          ],
+        },
+      ],
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const s = makeRes();
+    route(app, "get", "/status")({}, s);
+    assert.equal(s.body.activeRouteName, null);
+  });
+
+  test("fetch-active-route falls back to the model when no provider has the route", async () => {
+    app.selfTree["navigation.course.activeRoute.href"] =
+      "/resources/routes/urn:mrn:signalk:uuid:legacy";
+    app.pathTree["resources.routes.urn:mrn:signalk:uuid:legacy"] = {
+      feature: {
+        type: "Feature",
+        geometry: {
+          type: "LineString",
+          coordinates: [
+            [0, 0],
+            [1, 1],
+          ],
+        },
+        properties: { name: "Legacy route" },
+      },
+    };
+    startWithTestHooks();
+    plugin.registerWithRouter(app.router);
+
+    const res = makeRes();
+    await route(app, "post", "/fetch-active-route")({}, res);
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.status, "started");
   });
 
   test("busy job rejects concurrent fetches with 409", async () => {
